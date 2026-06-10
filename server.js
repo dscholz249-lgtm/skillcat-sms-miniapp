@@ -8,6 +8,18 @@ const { listSessions, recentLog } = require('./db');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Open CORS so the dashboard prototype (served from the mock on a different
+// origin) can POST to /test/start-batch. The mock-stage app is a test harness
+// with fake data — there is nothing sensitive to protect at the browser layer;
+// real auth lives at the deployment boundary (Railway password protection).
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json());
 
 // ----------------------------------------------------------------- TWILIO INBOUND
