@@ -1,0 +1,21 @@
+{
+  "name": "skillcat-sms-miniapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SMS ride-along review mini-app: Twilio transport + Claude-parsed conversation, talks to the SkillCat mock platform",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.1",
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "twilio": "^5.4.0"
+  }
+}
