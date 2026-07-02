@@ -152,6 +152,15 @@ function getLogbook(companyId) {
   return db.prepare('SELECT * FROM logbook_entries ORDER BY created_at DESC').all();
 }
 
+// Normalize any US phone format to E.164 (+1XXXXXXXXXX) for consistent storage/lookup.
+function normalizePhone(phone) {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return phone; // return as-is if we can't normalize
+}
+
 // ----------------------------------------------------------------- employees (snapshot)
 function ingestSnapshot(employees) {
   const replace = db.prepare(`
@@ -161,7 +170,7 @@ function ingestSnapshot(employees) {
   const ts = nowMs();
   db.transaction((rows) => {
     for (const e of rows) {
-      replace.run(e.id, e.name, e.phone ?? null, e.email ?? null, e.title ?? null, e.company_id ?? null, ts);
+      replace.run(e.id, e.name, normalizePhone(e.phone), e.email ?? null, e.title ?? null, e.company_id ?? null, ts);
     }
   })(employees || []);
 }
@@ -178,7 +187,8 @@ function findEmployee(name) {
 }
 
 function getCompanyByPhone(phone) {
-  const row = db.prepare('SELECT company_id FROM employees WHERE phone = ?').get(phone);
+  const normalized = normalizePhone(phone);
+  const row = db.prepare('SELECT company_id FROM employees WHERE phone = ?').get(normalized);
   return row ? row.company_id : null;
 }
 
