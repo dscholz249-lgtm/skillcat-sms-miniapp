@@ -73,12 +73,23 @@ app.post('/api/snapshot/ingest', (req, res) => {
 app.post('/api/debug/parse', async (req, res) => {
   const { text } = req.body || {};
   if (!text) return res.status(400).json({ error: 'text required' });
-  const { parseMessage } = require('./lib/parse');
   try {
-    const result = await parseMessage(text);
-    res.json({ input: text, result });
+    const Anthropic = require('@anthropic-ai/sdk');
+    const client = new (Anthropic.default || Anthropic)();
+    const model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+    const { SYSTEM_PROMPT } = require('./lib/parse');
+    const resp = await client.messages.create({
+      model,
+      max_tokens: 512,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: text }],
+    });
+    const raw = resp.content?.[0]?.text ?? '(no text block)';
+    let parsed = null;
+    try { parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()); } catch {}
+    res.json({ input: text, model, raw_model_output: raw, parsed });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0, 5) });
   }
 });
 
