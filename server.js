@@ -69,6 +69,19 @@ app.post('/api/snapshot/ingest', (req, res) => {
   res.json({ ok: true, count: employees.length });
 });
 
+// ----------------------------------------------------------------- PARSE TEST
+app.post('/api/debug/parse', async (req, res) => {
+  const { text } = req.body || {};
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const { parseMessage } = require('./lib/parse');
+  try {
+    const result = await parseMessage(text);
+    res.json({ input: text, result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ----------------------------------------------------------------- HEALTH / DEBUG
 app.get('/health', (_req, res) => {
   const keys = {
