@@ -70,7 +70,18 @@ app.post('/api/snapshot/ingest', (req, res) => {
 });
 
 // ----------------------------------------------------------------- HEALTH / DEBUG
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => {
+  const keys = {
+    ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
+    TWILIO_AUTH_TOKEN: !!process.env.TWILIO_AUTH_TOKEN,
+    TWILIO_ACCOUNT_SID: !!process.env.TWILIO_ACCOUNT_SID,
+    TWILIO_MESSAGING_SERVICE_SID: !!process.env.TWILIO_MESSAGING_SERVICE_SID,
+    SUPABASE_URL: !!process.env.SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+  };
+  const missing = Object.keys(keys).filter(k => !keys[k]);
+  res.json({ ok: missing.length === 0, keys, missing });
+});
 
 app.get('/api/debug/state', (_req, res) => {
   res.json({ sessions: listSessions(), log: recentLog(100) });
