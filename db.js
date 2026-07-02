@@ -8,13 +8,9 @@ db.pragma('foreign_keys = ON');
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     manager_phone       TEXT PRIMARY KEY,
-    company_id          TEXT NOT NULL,
-    batch_id            TEXT NOT NULL,
-    pending_review_ids  TEXT NOT NULL,
-    current_review_id   TEXT,
-    pending_readiness   TEXT,
-    step                TEXT NOT NULL,
-    original_count      INTEGER NOT NULL DEFAULT 0,
+    step                TEXT NOT NULL DEFAULT 'IDLE',
+    last_request_type   TEXT,
+    last_intent_json    TEXT,
     updated_at          TEXT NOT NULL
   );
 
@@ -28,42 +24,61 @@ db.exec(`
     step_after    TEXT,
     created_at    TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS action_queue (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    type          TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    manager_phone TEXT NOT NULL,
+    company_id    TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    actioned_by   TEXT,
+    actioned_note TEXT,
+    created_at    INTEGER NOT NULL,
+    actioned_at   INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS logbook_entries (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id       TEXT,
+    employee_name_raw TEXT,
+    manager_phone     TEXT NOT NULL,
+    company_id        TEXT,
+    body              TEXT NOT NULL,
+    tags              TEXT NOT NULL DEFAULT '[]',
+    source_message_id INTEGER,
+    created_at        INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS employees (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    phone       TEXT,
+    email       TEXT,
+    title       TEXT,
+    company_id  TEXT,
+    snapshot_at INTEGER
+  );
 `);
 
 function now() { return new Date().toISOString(); }
+function nowMs() { return Date.now(); }
 
+// ----------------------------------------------------------------- sessions
 function getSession(phone) {
-  const row = db.prepare('SELECT * FROM sessions WHERE manager_phone = ?').get(phone);
-  if (!row) return null;
-  return {
-    ...row,
-    pending_review_ids: JSON.parse(row.pending_review_ids),
-  };
+  return db.prepare('SELECT * FROM sessions WHERE manager_phone = ?').get(phone) || null;
 }
 
 function upsertSession(s) {
   db.prepare(`
-    INSERT INTO sessions (manager_phone, company_id, batch_id, pending_review_ids,
-                         current_review_id, pending_readiness, step, original_count, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO sessions (manager_phone, step, last_request_type, last_intent_json, updated_at)
+    VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(manager_phone) DO UPDATE SET
-      company_id         = excluded.company_id,
-      batch_id           = excluded.batch_id,
-      pending_review_ids = excluded.pending_review_ids,
-      current_review_id  = excluded.current_review_id,
-      pending_readiness  = excluded.pending_readiness,
       step               = excluded.step,
-      original_count     = excluded.original_count,
+      last_request_type  = excluded.last_request_type,
+      last_intent_json   = excluded.last_intent_json,
       updated_at         = excluded.updated_at
-  `).run(
-    s.manager_phone, s.company_id, s.batch_id,
-    JSON.stringify(s.pending_review_ids),
-    s.current_review_id ?? null,
-    s.pending_readiness ?? null,
-    s.step,
-    s.original_count,
-    now(),
-  );
+  `).run(s.manager_phone, s.step, s.last_request_type ?? null, s.last_intent_json ?? null, now());
 }
 
 function deleteSession(phone) {
@@ -71,22 +86,98 @@ function deleteSession(phone) {
 }
 
 function listSessions() {
-  return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all()
-    .map(r => ({ ...r, pending_review_ids: JSON.parse(r.pending_review_ids) }));
+  return db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC').all();
 }
 
+// ----------------------------------------------------------------- message_log
 function logMessage({ phone, direction, body, parsed, stepBefore, stepAfter }) {
-  db.prepare(`
+  return db.prepare(`
     INSERT INTO message_log (manager_phone, direction, body, parsed_json, step_before, step_after, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(phone, direction, body ?? null, parsed ? JSON.stringify(parsed) : null,
-         stepBefore ?? null, stepAfter ?? null, now());
+  `).run(
+    phone, direction, body ?? null, parsed ? JSON.stringify(parsed) : null,
+    stepBefore ?? null, stepAfter ?? null, now(),
+  ).lastInsertRowid;
 }
 
 function recentLog(limit = 100) {
   return db.prepare('SELECT * FROM message_log ORDER BY id DESC LIMIT ?').all(limit);
 }
 
+// ----------------------------------------------------------------- action_queue
+function enqueueAction({ type, payload, managerPhone, companyId }) {
+  db.prepare(`
+    INSERT INTO action_queue (type, payload, manager_phone, company_id, status, created_at)
+    VALUES (?, ?, ?, ?, 'pending', ?)
+  `).run(type, JSON.stringify(payload), managerPhone, companyId ?? null, nowMs());
+}
+
+function getQueue(status) {
+  if (status) {
+    return db.prepare('SELECT * FROM action_queue WHERE status = ? ORDER BY created_at DESC').all(status);
+  }
+  return db.prepare('SELECT * FROM action_queue ORDER BY created_at DESC').all();
+}
+
+function markActioned(id, { actionedBy, note }) {
+  db.prepare(`
+    UPDATE action_queue SET status = 'actioned', actioned_by = ?, actioned_note = ?, actioned_at = ?
+    WHERE id = ?
+  `).run(actionedBy ?? null, note ?? null, nowMs(), id);
+}
+
+// ----------------------------------------------------------------- logbook_entries
+function addLogbookEntry({ employeeId, employeeNameRaw, managerPhone, companyId, body, tags, sourceMessageId }) {
+  db.prepare(`
+    INSERT INTO logbook_entries
+      (employee_id, employee_name_raw, manager_phone, company_id, body, tags, source_message_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    employeeId ?? null, employeeNameRaw ?? null, managerPhone,
+    companyId ?? null, body, JSON.stringify(tags || []),
+    sourceMessageId ?? null, nowMs(),
+  );
+}
+
+function getLogbook() {
+  return db.prepare('SELECT * FROM logbook_entries ORDER BY created_at DESC').all();
+}
+
+// ----------------------------------------------------------------- employees (snapshot)
+function ingestSnapshot(employees) {
+  const replace = db.prepare(`
+    INSERT OR REPLACE INTO employees (id, name, phone, email, title, company_id, snapshot_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const ts = nowMs();
+  db.transaction((rows) => {
+    for (const e of rows) {
+      replace.run(e.id, e.name, e.phone ?? null, e.email ?? null, e.title ?? null, e.company_id ?? null, ts);
+    }
+  })(employees || []);
+}
+
+function findEmployee(name) {
+  if (!name) return null;
+  const lower = name.toLowerCase().trim();
+  const all = db.prepare('SELECT * FROM employees').all();
+  const exact = all.find(e => e.name.toLowerCase() === lower);
+  if (exact) return exact;
+  const byFirst = all.filter(e => e.name.toLowerCase().split(/\s+/)[0] === lower);
+  if (byFirst.length === 1) return byFirst[0];
+  return null;
+}
+
+function getCompanyByPhone(phone) {
+  const row = db.prepare('SELECT company_id FROM employees WHERE phone = ?').get(phone);
+  return row ? row.company_id : null;
+}
+
 module.exports = {
-  db, getSession, upsertSession, deleteSession, listSessions, logMessage, recentLog,
+  db,
+  getSession, upsertSession, deleteSession, listSessions,
+  logMessage, recentLog,
+  enqueueAction, getQueue, markActioned,
+  addLogbookEntry, getLogbook,
+  ingestSnapshot, findEmployee, getCompanyByPhone,
 };
