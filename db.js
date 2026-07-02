@@ -112,9 +112,15 @@ function enqueueAction({ type, payload, managerPhone, companyId }) {
   `).run(type, JSON.stringify(payload), managerPhone, companyId ?? null, nowMs());
 }
 
-function getQueue(status) {
+function getQueue(status, companyId) {
+  if (status && companyId) {
+    return db.prepare('SELECT * FROM action_queue WHERE status = ? AND company_id = ? ORDER BY created_at DESC').all(status, companyId);
+  }
   if (status) {
     return db.prepare('SELECT * FROM action_queue WHERE status = ? ORDER BY created_at DESC').all(status);
+  }
+  if (companyId) {
+    return db.prepare('SELECT * FROM action_queue WHERE company_id = ? ORDER BY created_at DESC').all(companyId);
   }
   return db.prepare('SELECT * FROM action_queue ORDER BY created_at DESC').all();
 }
@@ -139,7 +145,10 @@ function addLogbookEntry({ employeeId, employeeNameRaw, managerPhone, companyId,
   );
 }
 
-function getLogbook() {
+function getLogbook(companyId) {
+  if (companyId) {
+    return db.prepare('SELECT * FROM logbook_entries WHERE company_id = ? ORDER BY created_at DESC').all(companyId);
+  }
   return db.prepare('SELECT * FROM logbook_entries ORDER BY created_at DESC').all();
 }
 

@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const { validateSignature } = require('./lib/twilio');
 const { handleInbound } = require('./lib/conversation');
+const { initReminders } = require('./lib/reminders');
 const {
   listSessions, recentLog,
   getQueue, markActioned,
@@ -40,7 +41,8 @@ app.post('/twilio/inbound',
 // ----------------------------------------------------------------- ACTION QUEUE
 app.get('/api/queue', (req, res) => {
   const status = req.query.status || null;
-  res.json(getQueue(status));
+  const companyId = req.query.company_id || null;
+  res.json(getQueue(status, companyId));
 });
 
 app.post('/api/queue/:id/action', (req, res) => {
@@ -52,8 +54,9 @@ app.post('/api/queue/:id/action', (req, res) => {
 });
 
 // ----------------------------------------------------------------- LOGBOOK
-app.get('/api/logbook', (_req, res) => {
-  res.json(getLogbook());
+app.get('/api/logbook', (req, res) => {
+  const companyId = req.query.company_id || null;
+  res.json(getLogbook(companyId));
 });
 
 // ----------------------------------------------------------------- SNAPSHOT INGEST
@@ -78,6 +81,7 @@ app.use((req, res) => res.status(404).json({ error: 'not found', path: req.path 
 
 app.listen(PORT, () => {
   console.log(`[logbook] http://0.0.0.0:${PORT}`);
+  initReminders();
   if (!process.env.TWILIO_AUTH_TOKEN) console.warn('[logbook] WARNING: TWILIO_AUTH_TOKEN unset — signature validation disabled');
   if (!process.env.TWILIO_MESSAGING_SERVICE_SID) console.warn('[logbook] WARNING: TWILIO_MESSAGING_SERVICE_SID unset — outbound SMS logs to console only');
   if (!process.env.ANTHROPIC_API_KEY) console.warn('[logbook] WARNING: ANTHROPIC_API_KEY unset — NL parse will always return unclear');
