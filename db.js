@@ -175,15 +175,20 @@ function ingestSnapshot(employees) {
   })(employees || []);
 }
 
-function findEmployee(name) {
-  if (!name) return null;
+function findEmployee(name, companyId) {
+  const candidates = findEmployeeCandidates(name, companyId);
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function findEmployeeCandidates(name, companyId) {
+  if (!name) return [];
   const lower = name.toLowerCase().trim();
-  const all = db.prepare('SELECT * FROM employees').all();
-  const exact = all.find(e => e.name.toLowerCase() === lower);
-  if (exact) return exact;
-  const byFirst = all.filter(e => e.name.toLowerCase().split(/\s+/)[0] === lower);
-  if (byFirst.length === 1) return byFirst[0];
-  return null;
+  let all = db.prepare('SELECT * FROM employees').all();
+  if (companyId) all = all.filter(e => e.company_id === companyId);
+  const exact = all.filter(e => e.name.toLowerCase() === lower);
+  if (exact.length > 0) return exact;
+  const first = lower.split(/\s+/)[0];
+  return all.filter(e => e.name.toLowerCase().split(/\s+/)[0] === first);
 }
 
 function getCompanyByPhone(phone) {
@@ -198,5 +203,5 @@ module.exports = {
   logMessage, recentLog,
   enqueueAction, getQueue, markActioned,
   addLogbookEntry, getLogbook,
-  ingestSnapshot, findEmployee, getCompanyByPhone,
+  ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone,
 };
