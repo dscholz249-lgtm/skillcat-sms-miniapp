@@ -125,6 +125,10 @@ function getQueue(status, companyId) {
   return db.prepare('SELECT * FROM action_queue ORDER BY created_at DESC').all();
 }
 
+function getQueueItem(id) {
+  return db.prepare('SELECT * FROM action_queue WHERE id = ?').get(id) || null;
+}
+
 function markActioned(id, { actionedBy, note }) {
   db.prepare(`
     UPDATE action_queue SET status = 'actioned', actioned_by = ?, actioned_note = ?, actioned_at = ?
@@ -201,7 +205,7 @@ module.exports = {
   db,
   getSession, upsertSession, deleteSession, listSessions,
   logMessage, recentLog,
-  enqueueAction, getQueue, markActioned,
+  enqueueAction, getQueue, getQueueItem, markActioned,
   addLogbookEntry, getLogbook,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone,
 };

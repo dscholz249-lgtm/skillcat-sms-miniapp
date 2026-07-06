@@ -3,10 +3,12 @@ const express = require('express');
 const { validateSignature } = require('./lib/twilio');
 const { handleInbound } = require('./lib/conversation');
 const { initReminders } = require('./lib/reminders');
+const { sendSMS } = require('./lib/twilio');
+const { COPY } = require('./lib/copy');
 const {
   listSessions, recentLog,
-  getQueue, markActioned,
-  getLogbook, ingestSnapshot,
+  getQueue, getQueueItem, markActioned,
+  getLogbook, ingestSnapshot, logMessage,
 } = require('./db');
 
 const app = express();
@@ -49,9 +51,31 @@ app.post('/api/queue/:id/action', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ error: 'invalid id' });
   const { actioned_by, note } = req.body || {};
+  const item = getQueueItem(id);
+  if (!item) return res.status(404).json({ error: 'not found' });
+  const alreadyActioned = item.status === 'actioned';
   markActioned(id, { actionedBy: actioned_by, note });
   res.json({ ok: true });
+  if (!alreadyActioned) {
+    notifyManagerActioned(item).catch(e => console.error('[action] notify failed', e.message));
+  }
 });
+
+async function notifyManagerActioned(item) {
+  if (!item.manager_phone) return;
+  let payload = {};
+  try { payload = JSON.parse(item.payload || '{}'); } catch (_) {}
+  let msg;
+  if (item.type === 'assign_training' && payload.employee_name && payload.certification_name) {
+    msg = COPY.ACTIONED_ASSIGN(payload.employee_name, payload.certification_name);
+  } else if (item.type === 'add_employee' && payload.name) {
+    msg = COPY.ACTIONED_ADD(payload.name);
+  } else {
+    msg = COPY.ACTIONED_GENERIC;
+  }
+  await sendSMS(item.manager_phone, msg);
+  logMessage({ phone: item.manager_phone, direction: 'out', body: msg, parsed: null, stepBefore: null, stepAfter: 'actioned-notify' });
+}
 
 // ----------------------------------------------------------------- LOGBOOK
 app.get('/api/logbook', (req, res) => {
