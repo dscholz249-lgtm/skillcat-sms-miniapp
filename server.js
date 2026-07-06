@@ -120,4 +120,33 @@ app.listen(PORT, () => {
   if (!process.env.TWILIO_AUTH_TOKEN) console.warn('[logbook] WARNING: TWILIO_AUTH_TOKEN unset — signature validation disabled');
   if (!process.env.TWILIO_MESSAGING_SERVICE_SID) console.warn('[logbook] WARNING: TWILIO_MESSAGING_SERVICE_SID unset — outbound SMS logs to console only');
   if (!process.env.ANTHROPIC_API_KEY) console.warn('[logbook] WARNING: ANTHROPIC_API_KEY unset — NL parse will always return unclear');
+  startupRosterSync();
 });
+
+// Re-populate SQLite from Next.js after Railway restarts wipe the ephemeral
+// container. Retries with backoff so Next.js has time to start if both
+// services restart simultaneously.
+async function startupRosterSync() {
+  const nextjsUrl = process.env.NEXTJS_URL;
+  if (!nextjsUrl) return;
+  const syncSecret = process.env.SYNC_SECRET;
+  const url = `${nextjsUrl.replace(/\/$/, '')}/api/internal/roster-sync`;
+  const headers = { 'Content-Type': 'application/json' };
+  if (syncSecret) headers['Authorization'] = `Bearer ${syncSecret}`;
+  const delay = ms => new Promise(r => setTimeout(r, ms));
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    if (attempt > 1) await delay(attempt * 4000);
+    try {
+      const res = await fetch(url, { method: 'POST', headers, signal: AbortSignal.timeout(10000) });
+      if (res.ok) {
+        const data = await res.json();
+        console.log(`[logbook] startup roster sync: ${data.synced} companies`);
+        return;
+      }
+      console.warn(`[logbook] startup sync attempt ${attempt}: HTTP ${res.status}`);
+    } catch (e) {
+      console.warn(`[logbook] startup sync attempt ${attempt}: ${e.message}`);
+    }
+  }
+  console.warn('[logbook] startup roster sync: could not reach Next.js after 5 attempts — run Sync from admin');
+}
