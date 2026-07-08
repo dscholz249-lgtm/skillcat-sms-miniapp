@@ -1,10 +1,18 @@
 require('dotenv').config();
+
+// Sentry must be initialised before anything else
+const Sentry = require('@sentry/node');
+if (process.env.SENTRY_DSN) {
+  Sentry.init({ dsn: process.env.SENTRY_DSN, tracesSampleRate: 0.2 });
+}
+
 const express = require('express');
 const { validateSignature } = require('./lib/twilio');
 const { handleInbound } = require('./lib/conversation');
 const { initReminders } = require('./lib/reminders');
 const { sendSMS } = require('./lib/twilio');
 const { COPY } = require('./lib/copy');
+const { capture } = require('./lib/analytics');
 const {
   listSessions, recentLog,
   getQueue, getQueueItem, markActioned,
@@ -57,6 +65,7 @@ app.post('/api/queue/:id/action', (req, res) => {
   markActioned(id, { actionedBy: actioned_by, note });
   res.json({ ok: true });
   if (!alreadyActioned) {
+    capture(item.manager_phone, 'request_actioned', { request_type: item.type, company_id: item.company_id });
     notifyManagerActioned(item).catch(e => console.error('[action] notify failed', e.message));
   }
 });
