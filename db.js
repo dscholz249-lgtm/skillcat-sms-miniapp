@@ -201,6 +201,53 @@ function getCompanyByPhone(phone) {
   return row ? row.company_id : null;
 }
 
+// ----------------------------------------------------------------- analytics
+function getAnalytics(companyId, managerPhone) {
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
+  let messagesByDay = [];
+  if (managerPhone) {
+    messagesByDay = db.prepare(`
+      SELECT
+        substr(created_at, 1, 10) AS date,
+        SUM(CASE WHEN direction = 'in'  THEN 1 ELSE 0 END) AS inbound,
+        SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS outbound
+      FROM message_log
+      WHERE manager_phone = ?
+        AND substr(created_at, 1, 10) >= ?
+      GROUP BY substr(created_at, 1, 10)
+      ORDER BY date ASC
+    `).all(managerPhone, thirtyDaysAgo);
+  }
+
+  let requestsByType = [];
+  if (companyId) {
+    requestsByType = db.prepare(`
+      SELECT
+        type,
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'actioned' THEN 1 ELSE 0 END) AS actioned
+      FROM action_queue
+      WHERE company_id = ?
+      GROUP BY type
+      ORDER BY total DESC
+    `).all(companyId);
+  }
+
+  return {
+    messages_by_day: messagesByDay,
+    requests_by_type: requestsByType,
+    totals: {
+      inbound_messages:  messagesByDay.reduce((s, r) => s + r.inbound,  0),
+      outbound_messages: messagesByDay.reduce((s, r) => s + r.outbound, 0),
+      requests_total:    requestsByType.reduce((s, r) => s + r.total,    0),
+      requests_actioned: requestsByType.reduce((s, r) => s + r.actioned, 0),
+    },
+  };
+}
+
 module.exports = {
   db,
   getSession, upsertSession, deleteSession, listSessions,
@@ -208,4 +255,5 @@ module.exports = {
   enqueueAction, getQueue, getQueueItem, markActioned,
   addLogbookEntry, getLogbook,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone,
+  getAnalytics,
 };

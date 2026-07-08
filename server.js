@@ -16,7 +16,7 @@ const { capture } = require('./lib/analytics');
 const {
   listSessions, recentLog,
   getQueue, getQueueItem, markActioned,
-  getLogbook, ingestSnapshot, logMessage,
+  getLogbook, ingestSnapshot, logMessage, getAnalytics,
 } = require('./db');
 
 const app = express();
@@ -85,6 +85,13 @@ async function notifyManagerActioned(item) {
   await sendSMS(item.manager_phone, msg);
   logMessage({ phone: item.manager_phone, direction: 'out', body: msg, parsed: null, stepBefore: null, stepAfter: 'actioned-notify' });
 }
+
+// ----------------------------------------------------------------- ANALYTICS
+app.get('/api/analytics', (req, res) => {
+  const companyId = req.query.company_id || null;
+  const managerPhone = req.query.manager_phone || null;
+  res.json(getAnalytics(companyId, managerPhone));
+});
 
 // ----------------------------------------------------------------- LOGBOOK
 app.get('/api/logbook', (req, res) => {
