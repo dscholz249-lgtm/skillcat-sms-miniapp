@@ -89,8 +89,8 @@ async function notifyManagerActioned(item) {
 // ----------------------------------------------------------------- ANALYTICS
 app.get('/api/analytics', (req, res) => {
   const companyId = req.query.company_id || null;
-  const managerPhone = req.query.manager_phone || null;
-  res.json(getAnalytics(companyId, managerPhone));
+  const managerPhones = req.query.manager_phones || null;
+  res.json(getAnalytics(companyId, managerPhones));
 });
 
 app.get('/api/analytics/global', (_req, res) => {
