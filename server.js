@@ -16,7 +16,7 @@ const { capture } = require('./lib/analytics');
 const {
   listSessions, recentLog,
   getQueue, getQueueItem, markActioned,
-  getLogbook, ingestSnapshot, logMessage, getAnalytics,
+  getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
 } = require('./db');
 
 const app = express();
@@ -91,6 +91,10 @@ app.get('/api/analytics', (req, res) => {
   const companyId = req.query.company_id || null;
   const managerPhone = req.query.manager_phone || null;
   res.json(getAnalytics(companyId, managerPhone));
+});
+
+app.get('/api/analytics/global', (_req, res) => {
+  res.json(getGlobalAnalytics());
 });
 
 // ----------------------------------------------------------------- LOGBOOK

@@ -204,8 +204,8 @@ function getCompanyByPhone(phone) {
 // ----------------------------------------------------------------- analytics
 function getAnalytics(companyId, managerPhone) {
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+    .toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
 
   let messagesByDay = [];
   if (managerPhone) {
@@ -236,6 +236,48 @@ function getAnalytics(companyId, managerPhone) {
     `).all(companyId);
   }
 
+  // DAU: active today (0 or 1 for a single manager)
+  let dau = 0;
+  if (managerPhone) {
+    dau = db.prepare(`
+      SELECT COUNT(DISTINCT manager_phone) AS count FROM message_log
+      WHERE direction = 'in' AND manager_phone = ? AND substr(created_at, 1, 10) = ?
+    `).get(managerPhone, today)?.count ?? 0;
+  }
+
+  // MAU: active in the last 30 days
+  let mau = 0;
+  if (managerPhone) {
+    mau = db.prepare(`
+      SELECT COUNT(DISTINCT manager_phone) AS count FROM message_log
+      WHERE direction = 'in' AND manager_phone = ? AND substr(created_at, 1, 10) >= ?
+    `).get(managerPhone, thirtyDaysAgo)?.count ?? 0;
+  }
+
+  // Retention: has the manager returned at 2 / 7 / 30 days since first message?
+  let retention = { day_2: null, day_7: null, day_30: null };
+  if (managerPhone) {
+    const row = db.prepare(`
+      WITH first_msg AS (
+        SELECT MIN(substr(created_at, 1, 10)) AS cohort_date
+        FROM message_log WHERE direction = 'in' AND manager_phone = ?
+      )
+      SELECT
+        IFNULL(MAX(CASE WHEN julianday(substr(m.created_at,1,10)) - julianday(f.cohort_date) >= 2  THEN 1 ELSE 0 END), 0) AS retained_2d,
+        IFNULL(MAX(CASE WHEN julianday(substr(m.created_at,1,10)) - julianday(f.cohort_date) >= 7  THEN 1 ELSE 0 END), 0) AS retained_7d,
+        IFNULL(MAX(CASE WHEN julianday(substr(m.created_at,1,10)) - julianday(f.cohort_date) >= 30 THEN 1 ELSE 0 END), 0) AS retained_30d
+      FROM first_msg f
+      LEFT JOIN message_log m ON m.direction = 'in' AND m.manager_phone = ?
+    `).get(managerPhone, managerPhone);
+    if (row) {
+      retention = {
+        day_2:  row.retained_2d  === 1,
+        day_7:  row.retained_7d  === 1,
+        day_30: row.retained_30d === 1,
+      };
+    }
+  }
+
   return {
     messages_by_day: messagesByDay,
     requests_by_type: requestsByType,
@@ -244,6 +286,71 @@ function getAnalytics(companyId, managerPhone) {
       outbound_messages: messagesByDay.reduce((s, r) => s + r.outbound, 0),
       requests_total:    requestsByType.reduce((s, r) => s + r.total,    0),
       requests_actioned: requestsByType.reduce((s, r) => s + r.actioned, 0),
+    },
+    dau,
+    mau,
+    retention,
+  };
+}
+
+function getGlobalAnalytics() {
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    .toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const dau = db.prepare(`
+    SELECT COUNT(DISTINCT manager_phone) AS count FROM message_log
+    WHERE direction = 'in' AND substr(created_at, 1, 10) = ?
+  `).get(today)?.count ?? 0;
+
+  const mau = db.prepare(`
+    SELECT COUNT(DISTINCT manager_phone) AS count FROM message_log
+    WHERE direction = 'in' AND substr(created_at, 1, 10) >= ?
+  `).get(thirtyDaysAgo)?.count ?? 0;
+
+  const dauTrend = db.prepare(`
+    SELECT substr(created_at, 1, 10) AS date, COUNT(DISTINCT manager_phone) AS unique_users
+    FROM message_log
+    WHERE direction = 'in' AND substr(created_at, 1, 10) >= ?
+    GROUP BY date ORDER BY date ASC
+  `).all(thirtyDaysAgo);
+
+  const requestsByType = db.prepare(`
+    SELECT type, COUNT(*) AS total,
+      SUM(CASE WHEN status = 'actioned' THEN 1 ELSE 0 END) AS actioned
+    FROM action_queue GROUP BY type ORDER BY total DESC
+  `).all();
+
+  const retRow = db.prepare(`
+    WITH cohorts AS (
+      SELECT manager_phone, MIN(substr(created_at,1,10)) AS cohort_date
+      FROM message_log WHERE direction = 'in' GROUP BY manager_phone
+    ),
+    activity AS (
+      SELECT DISTINCT manager_phone, substr(created_at,1,10) AS activity_date
+      FROM message_log WHERE direction = 'in'
+    )
+    SELECT
+      COUNT(DISTINCT c.manager_phone) AS total,
+      COUNT(DISTINCT CASE WHEN julianday(a.activity_date) - julianday(c.cohort_date) >= 2  THEN c.manager_phone END) AS retained_2d,
+      COUNT(DISTINCT CASE WHEN julianday(a.activity_date) - julianday(c.cohort_date) >= 7  THEN c.manager_phone END) AS retained_7d,
+      COUNT(DISTINCT CASE WHEN julianday(a.activity_date) - julianday(c.cohort_date) >= 30 THEN c.manager_phone END) AS retained_30d
+    FROM cohorts c LEFT JOIN activity a ON c.manager_phone = a.manager_phone
+  `).get();
+
+  const total = retRow?.total ?? 0;
+  const pct = (n) => total > 0 ? Math.round((n / total) * 100) : null;
+
+  return {
+    dau,
+    mau,
+    dau_trend: dauTrend,
+    requests_by_type: requestsByType,
+    retention: {
+      total_managers: total,
+      day_2:  pct(retRow?.retained_2d  ?? 0),
+      day_7:  pct(retRow?.retained_7d  ?? 0),
+      day_30: pct(retRow?.retained_30d ?? 0),
     },
   };
 }
@@ -255,5 +362,5 @@ module.exports = {
   enqueueAction, getQueue, getQueueItem, markActioned,
   addLogbookEntry, getLogbook,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone,
-  getAnalytics,
+  getAnalytics, getGlobalAnalytics,
 };
