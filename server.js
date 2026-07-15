@@ -75,7 +75,8 @@ app.post('/twilio/inbound',
 app.get('/api/queue', (req, res) => {
   const status = req.query.status || null;
   const companyId = req.query.company_id || null;
-  res.json(getQueue(status, companyId));
+  const managerPhone = req.query.manager_phone || null;
+  res.json(getQueue(status, companyId, managerPhone));
 });
 
 app.post('/api/queue/:id/action', (req, res) => {
@@ -123,7 +124,8 @@ app.get('/api/analytics/global', (_req, res) => {
 // ----------------------------------------------------------------- LOGBOOK
 app.get('/api/logbook', (req, res) => {
   const companyId = req.query.company_id || null;
-  res.json(getLogbook(companyId));
+  const managerPhone = req.query.manager_phone || null;
+  res.json(getLogbook(companyId, managerPhone));
 });
 
 // ----------------------------------------------------------------- SNAPSHOT INGEST

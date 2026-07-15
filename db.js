@@ -112,17 +112,14 @@ function enqueueAction({ type, payload, managerPhone, companyId }) {
   `).run(type, JSON.stringify(payload), managerPhone, companyId ?? null, nowMs());
 }
 
-function getQueue(status, companyId) {
-  if (status && companyId) {
-    return db.prepare('SELECT * FROM action_queue WHERE status = ? AND company_id = ? ORDER BY created_at DESC').all(status, companyId);
-  }
-  if (status) {
-    return db.prepare('SELECT * FROM action_queue WHERE status = ? ORDER BY created_at DESC').all(status);
-  }
-  if (companyId) {
-    return db.prepare('SELECT * FROM action_queue WHERE company_id = ? ORDER BY created_at DESC').all(companyId);
-  }
-  return db.prepare('SELECT * FROM action_queue ORDER BY created_at DESC').all();
+function getQueue(status, companyId, managerPhone) {
+  const conditions = [];
+  const params = [];
+  if (status) { conditions.push('status = ?'); params.push(status); }
+  if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
+  if (managerPhone) { conditions.push('manager_phone = ?'); params.push(managerPhone); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  return db.prepare(`SELECT * FROM action_queue ${where} ORDER BY created_at DESC`).all(...params);
 }
 
 function getQueueItem(id) {
@@ -149,11 +146,13 @@ function addLogbookEntry({ employeeId, employeeNameRaw, managerPhone, companyId,
   );
 }
 
-function getLogbook(companyId) {
-  if (companyId) {
-    return db.prepare('SELECT * FROM logbook_entries WHERE company_id = ? ORDER BY created_at DESC').all(companyId);
-  }
-  return db.prepare('SELECT * FROM logbook_entries ORDER BY created_at DESC').all();
+function getLogbook(companyId, managerPhone) {
+  const conditions = [];
+  const params = [];
+  if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
+  if (managerPhone) { conditions.push('manager_phone = ?'); params.push(managerPhone); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  return db.prepare(`SELECT * FROM logbook_entries ${where} ORDER BY created_at DESC`).all(...params);
 }
 
 // Normalize any US phone format to E.164 (+1XXXXXXXXXX) for consistent storage/lookup.
