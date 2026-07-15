@@ -22,15 +22,38 @@ const {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const API_SECRET = process.env.API_SECRET;
+if (!API_SECRET) {
+  console.error('[SECURITY] API_SECRET is not set — all /api/* requests will be rejected with 503');
+}
+
+function requireApiSecret(req, res, next) {
+  if (!API_SECRET) {
+    return res.status(503).json({ error: 'server misconfigured: API_SECRET not set' });
+  }
+  const auth = req.headers['authorization'];
+  if (auth !== `Bearer ${API_SECRET}`) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  next();
+}
+
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  const nextjsOrigin = process.env.NEXTJS_URL ? process.env.NEXTJS_URL.replace(/\/$/, '') : null;
+  if (origin && nextjsOrigin && origin === nextjsOrigin) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
 app.use(express.json());
+
+// All /api/* routes require the shared Bearer secret
+app.use('/api', requireApiSecret);
 
 // ----------------------------------------------------------------- TWILIO INBOUND
 app.post('/twilio/inbound',
