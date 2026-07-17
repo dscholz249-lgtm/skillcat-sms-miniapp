@@ -51,15 +51,19 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS employees (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    phone       TEXT,
-    email       TEXT,
-    title       TEXT,
-    company_id  TEXT,
-    snapshot_at INTEGER
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    phone        TEXT,
+    email        TEXT,
+    title        TEXT,
+    company_id   TEXT,
+    company_name TEXT,
+    snapshot_at  INTEGER
   );
 `);
+
+// Safe migration for existing databases
+try { db.exec('ALTER TABLE employees ADD COLUMN company_name TEXT'); } catch (_) {}
 
 function now() { return new Date().toISOString(); }
 function nowMs() { return Date.now(); }
@@ -167,15 +171,22 @@ function normalizePhone(phone) {
 // ----------------------------------------------------------------- employees (snapshot)
 function ingestSnapshot(employees) {
   const replace = db.prepare(`
-    INSERT OR REPLACE INTO employees (id, name, phone, email, title, company_id, snapshot_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO employees (id, name, phone, email, title, company_id, company_name, snapshot_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const ts = nowMs();
   db.transaction((rows) => {
     for (const e of rows) {
-      replace.run(e.id, e.name, normalizePhone(e.phone), e.email ?? null, e.title ?? null, e.company_id ?? null, ts);
+      replace.run(e.id, e.name, normalizePhone(e.phone), e.email ?? null, e.title ?? null, e.company_id ?? null, e.company_name ?? null, ts);
     }
   })(employees || []);
+}
+
+function getManagerInfoByPhone(phone) {
+  const normalized = normalizePhone(phone);
+  return db.prepare(
+    "SELECT name, company_id, company_name FROM employees WHERE phone = ? AND title = 'Manager' LIMIT 1"
+  ).get(normalized) || null;
 }
 
 function findEmployee(name, companyId) {
@@ -367,6 +378,6 @@ module.exports = {
   logMessage, recentLog,
   enqueueAction, getQueue, getQueueItem, markActioned,
   addLogbookEntry, getLogbook,
-  ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone,
+  ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
   getAnalytics, getGlobalAnalytics,
 };
