@@ -168,7 +168,9 @@ function getLogbook(companyId, managerPhone) {
   const conditions = [];
   const params = [];
   if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
-  if (managerPhone) { conditions.push('manager_phone = ?'); params.push(managerPhone); }
+  // Include both the manager's own entries and company-wide entries (manager_phone IS NULL)
+  // so technician-originated messages are visible to all company managers/directors.
+  if (managerPhone) { conditions.push('(manager_phone = ? OR manager_phone IS NULL)'); params.push(managerPhone); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return db.prepare(`SELECT * FROM logbook_entries ${where} ORDER BY created_at DESC`).all(...params);
 }
