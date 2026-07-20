@@ -17,6 +17,7 @@ const {
   listSessions, recentLog,
   getQueue, getQueueItem, markActioned,
   getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
+  getTechnicianMedia,
 } = require('./db');
 
 const app = express();
@@ -61,10 +62,17 @@ app.post('/twilio/inbound',
   validateSignature,
   async (req, res) => {
     const from = req.body.From;
-    const body = req.body.Body;
+    const body = req.body.Body ?? '';
+    const numMedia = parseInt(req.body.NumMedia ?? '0', 10);
+    const media = [];
+    for (let i = 0; i < numMedia; i++) {
+      const url = req.body[`MediaUrl${i}`];
+      const contentType = req.body[`MediaContentType${i}`];
+      if (url) media.push({ url, contentType: contentType ?? 'application/octet-stream' });
+    }
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
     try {
-      await handleInbound({ from, body });
+      await handleInbound({ from, body, media });
     } catch (e) {
       console.error('[inbound] unhandled error', e);
     }
@@ -178,6 +186,41 @@ app.get('/health', (_req, res) => {
 
 app.get('/api/debug/state', (_req, res) => {
   res.json({ sessions: listSessions(), log: recentLog(100) });
+});
+
+// ----------------------------------------------------------------- TECHNICIAN MEDIA
+app.get('/api/technician-media', (req, res) => {
+  const companyId = req.query.company_id || null;
+  const technicianId = req.query.technician_id || null;
+  if (!companyId || !technicianId) return res.status(400).json({ error: 'company_id and technician_id required' });
+  res.json(getTechnicianMedia(companyId, technicianId));
+});
+
+// ----------------------------------------------------------------- MEDIA PROXY
+// Fetches a Twilio media URL using Basic auth so the Next.js layer can serve
+// the image without embedding Twilio credentials in the browser.
+app.get('/api/media-proxy', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!accountSid || !authToken) return res.status(503).json({ error: 'Twilio credentials not configured' });
+  try {
+    const credentials = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
+    const upstream = await fetch(url, {
+      headers: { Authorization: `Basic ${credentials}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!upstream.ok) return res.status(upstream.status).json({ error: 'upstream error' });
+    const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    const buf = await upstream.arrayBuffer();
+    res.send(Buffer.from(buf));
+  } catch (e) {
+    console.error('[media-proxy]', e.message);
+    res.status(502).json({ error: 'failed to fetch media' });
+  }
 });
 
 // 404 fallthrough

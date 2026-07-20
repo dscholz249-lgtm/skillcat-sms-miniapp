@@ -62,7 +62,21 @@ db.exec(`
   );
 `);
 
-// Safe migration for existing databases
+db.exec(`
+  CREATE TABLE IF NOT EXISTS technician_media (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    technician_id       TEXT,
+    technician_name     TEXT,
+    technician_phone    TEXT NOT NULL,
+    company_id          TEXT,
+    media_url           TEXT NOT NULL,
+    media_content_type  TEXT,
+    caption             TEXT,
+    created_at          INTEGER NOT NULL
+  );
+`);
+
+// Safe migrations for existing databases
 try { db.exec('ALTER TABLE employees ADD COLUMN company_name TEXT'); } catch (_) {}
 
 function now() { return new Date().toISOString(); }
@@ -187,6 +201,35 @@ function getManagerInfoByPhone(phone) {
   return db.prepare(
     "SELECT name, company_id, company_name FROM employees WHERE phone = ? AND title = 'Manager' LIMIT 1"
   ).get(normalized) || null;
+}
+
+function getTechnicianByPhone(phone) {
+  const normalized = normalizePhone(phone);
+  return db.prepare(
+    "SELECT * FROM employees WHERE phone = ? AND title != 'Manager' LIMIT 1"
+  ).get(normalized) || null;
+}
+
+function addTechnicianMedia({ technicianId, technicianName, technicianPhone, companyId, mediaUrl, mediaContentType, caption }) {
+  return db.prepare(`
+    INSERT INTO technician_media (technician_id, technician_name, technician_phone, company_id, media_url, media_content_type, caption, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(technicianId ?? null, technicianName ?? null, technicianPhone, companyId ?? null, mediaUrl, mediaContentType ?? null, caption ?? null, nowMs());
+}
+
+function getTechnicianMedia(companyId, technicianId) {
+  let query = 'SELECT * FROM technician_media WHERE 1=1';
+  const params = [];
+  if (companyId) { query += ' AND company_id = ?'; params.push(companyId); }
+  if (technicianId) { query += ' AND technician_id = ?'; params.push(technicianId); }
+  query += ' ORDER BY created_at DESC';
+  return db.prepare(query).all(...params);
+}
+
+function getManagersByCompanyId(companyId) {
+  return db.prepare(
+    "SELECT * FROM employees WHERE company_id = ? AND title = 'Manager' AND phone IS NOT NULL AND phone != ''"
+  ).all(companyId);
 }
 
 function findEmployee(name, companyId) {
@@ -379,5 +422,6 @@ module.exports = {
   enqueueAction, getQueue, getQueueItem, markActioned,
   addLogbookEntry, getLogbook,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
+  getTechnicianByPhone, addTechnicianMedia, getTechnicianMedia, getManagersByCompanyId,
   getAnalytics, getGlobalAnalytics,
 };
