@@ -219,11 +219,21 @@ function addTechnicianMedia({ technicianId, technicianName, technicianPhone, com
   `).run(technicianId ?? null, technicianName ?? null, technicianPhone, companyId ?? null, mediaUrl, mediaContentType ?? null, caption ?? null, nowMs());
 }
 
-function getTechnicianMedia(companyId, technicianId) {
+function getTechnicianMedia(companyId, technicianId, technicianPhone) {
   let query = 'SELECT * FROM technician_media WHERE 1=1';
   const params = [];
   if (companyId) { query += ' AND company_id = ?'; params.push(companyId); }
-  if (technicianId) { query += ' AND technician_id = ?'; params.push(technicianId); }
+  if (technicianId && technicianPhone) {
+    // Match by ID or by phone (covers legacy rows stored before the ID bug was fixed)
+    query += ' AND (technician_id = ? OR technician_phone = ?)';
+    params.push(technicianId, technicianPhone);
+  } else if (technicianId) {
+    query += ' AND technician_id = ?';
+    params.push(technicianId);
+  } else if (technicianPhone) {
+    query += ' AND technician_phone = ?';
+    params.push(technicianPhone);
+  }
   query += ' ORDER BY created_at DESC';
   return db.prepare(query).all(...params);
 }

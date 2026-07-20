@@ -192,8 +192,9 @@ app.get('/api/debug/state', (_req, res) => {
 app.get('/api/technician-media', (req, res) => {
   const companyId = req.query.company_id || null;
   const technicianId = req.query.technician_id || null;
-  if (!companyId || !technicianId) return res.status(400).json({ error: 'company_id and technician_id required' });
-  res.json(getTechnicianMedia(companyId, technicianId));
+  const technicianPhone = req.query.technician_phone || null;
+  if (!companyId) return res.status(400).json({ error: 'company_id required' });
+  res.json(getTechnicianMedia(companyId, technicianId, technicianPhone));
 });
 
 // ----------------------------------------------------------------- MEDIA PROXY
