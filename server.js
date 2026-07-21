@@ -9,6 +9,7 @@ if (process.env.SENTRY_DSN) {
 const express = require('express');
 const { validateSignature } = require('./lib/twilio');
 const { handleInbound } = require('./lib/conversation');
+const { checkRateLimit } = require('./lib/rate-limit');
 const { initReminders } = require('./lib/reminders');
 const { sendSMS } = require('./lib/twilio');
 const { COPY } = require('./lib/copy');
@@ -71,6 +72,7 @@ app.post('/twilio/inbound',
       if (url) media.push({ url, contentType: contentType ?? 'application/octet-stream' });
     }
     res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    if (!checkRateLimit(from)) return;
     try {
       await handleInbound({ from, body, media });
     } catch (e) {
