@@ -164,13 +164,19 @@ function addLogbookEntry({ employeeId, employeeNameRaw, managerPhone, companyId,
   );
 }
 
-function getLogbook(companyId, managerPhone) {
+function getLogbook(companyId, managerPhone, technicianId) {
   const conditions = [];
   const params = [];
   if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
-  // Include both the manager's own entries and company-wide entries (manager_phone IS NULL)
-  // so technician-originated messages are visible to all company managers/directors.
-  if (managerPhone) { conditions.push("(manager_phone = ? OR manager_phone = '')"); params.push(managerPhone); }
+  if (technicianId) {
+    // Technician's own entries only — manager_phone = '' marks technician-originated entries
+    conditions.push("employee_id = ? AND manager_phone = ''");
+    params.push(technicianId);
+  } else if (managerPhone) {
+    // Manager's own entries + technician-originated entries (visible company-wide)
+    conditions.push("(manager_phone = ? OR manager_phone = '')");
+    params.push(managerPhone);
+  }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return db.prepare(`SELECT * FROM logbook_entries ${where} ORDER BY created_at DESC`).all(...params);
 }

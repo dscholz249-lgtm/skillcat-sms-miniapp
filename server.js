@@ -133,7 +133,8 @@ app.get('/api/analytics/global', (_req, res) => {
 app.get('/api/logbook', (req, res) => {
   const companyId = req.query.company_id || null;
   const managerPhone = req.query.manager_phone || null;
-  res.json(getLogbook(companyId, managerPhone));
+  const technicianId = req.query.technician_id || null;
+  res.json(getLogbook(companyId, managerPhone, technicianId));
 });
 
 // ----------------------------------------------------------------- SNAPSHOT INGEST
