@@ -18,7 +18,7 @@ const {
   listSessions, recentLog,
   getQueue, getQueueItem, markActioned,
   getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
-  getTechnicianMedia,
+  getTechnicianMedia, getLastActiveByPhones,
 } = require('./db');
 
 const app = express();
@@ -129,6 +129,11 @@ app.get('/api/analytics', (req, res) => {
 
 app.get('/api/analytics/global', (_req, res) => {
   res.json(getGlobalAnalytics());
+});
+
+app.get('/api/last-active', (req, res) => {
+  const phones = (req.query.phones || '').split(',').map(p => p.trim()).filter(Boolean);
+  res.json(getLastActiveByPhones(phones));
 });
 
 // ----------------------------------------------------------------- LOGBOOK

@@ -433,6 +433,20 @@ function getGlobalAnalytics() {
   };
 }
 
+// Returns the most recent inbound message timestamp for each phone in the list.
+// Covers both managers and technicians — message_log captures all inbound SMS/MMS.
+function getLastActiveByPhones(phones) {
+  if (!phones || phones.length === 0) return [];
+  const ph = phones.map(() => '?').join(',');
+  return db.prepare(`
+    SELECT manager_phone AS phone, MAX(created_at) AS last_active_at
+    FROM message_log
+    WHERE direction = 'in'
+      AND manager_phone IN (${ph})
+    GROUP BY manager_phone
+  `).all(...phones);
+}
+
 module.exports = {
   db,
   getSession, upsertSession, deleteSession, listSessions,
@@ -441,5 +455,5 @@ module.exports = {
   addLogbookEntry, getLogbook,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
   getTechnicianByPhone, addTechnicianMedia, getTechnicianMedia, getManagersByCompanyId,
-  getAnalytics, getGlobalAnalytics,
+  getAnalytics, getGlobalAnalytics, getLastActiveByPhones,
 };
