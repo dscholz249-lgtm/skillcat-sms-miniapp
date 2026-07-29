@@ -16,9 +16,9 @@ const { COPY } = require('./lib/copy');
 const { capture } = require('./lib/analytics');
 const {
   listSessions, recentLog,
-  getQueue, getQueueItem, markActioned,
+  getQueue, getQueueItem, markActioned, markIgnored,
   getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
-  getTechnicianMedia, getLastActiveByPhones,
+  getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
 } = require('./db');
 
 const app = express();
@@ -104,6 +104,19 @@ app.post('/api/queue/:id/action', (req, res) => {
   }
 });
 
+app.post('/api/queue/:id/ignore', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'invalid id' });
+  const { actioned_by, note } = req.body || {};
+  const item = getQueueItem(id);
+  if (!item) return res.status(404).json({ error: 'not found' });
+  if (item.status === 'pending') {
+    markIgnored(id, { actionedBy: actioned_by, note });
+    capture(item.manager_phone, 'request_ignored', { request_type: item.type, company_id: item.company_id });
+  }
+  res.json({ ok: true });
+});
+
 async function notifyManagerActioned(item) {
   if (!item.manager_phone) return;
   let payload = {};
@@ -134,6 +147,12 @@ app.get('/api/analytics/global', (_req, res) => {
 app.get('/api/last-active', (req, res) => {
   const phones = (req.query.phones || '').split(',').map(p => p.trim()).filter(Boolean);
   res.json(getLastActiveByPhones(phones));
+});
+
+// ----------------------------------------------------------------- CONVERSATIONS
+app.get('/api/conversations', (req, res) => {
+  const phones = (req.query.phones || '').split(',').map(p => p.trim()).filter(Boolean);
+  res.json(getMessagesByPhones(phones));
 });
 
 // ----------------------------------------------------------------- LOGBOOK

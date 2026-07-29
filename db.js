@@ -122,6 +122,18 @@ function recentLog(limit = 100) {
   return db.prepare('SELECT * FROM message_log ORDER BY id DESC LIMIT ?').all(limit);
 }
 
+function getMessagesByPhones(phones) {
+  if (!phones.length) return [];
+  const ph = phones.map(() => '?').join(',');
+  return db.prepare(`
+    SELECT id, manager_phone, direction, body, step_after, created_at
+    FROM message_log
+    WHERE manager_phone IN (${ph})
+      AND body != '(parsed)'
+    ORDER BY created_at ASC
+  `).all(...phones);
+}
+
 // ----------------------------------------------------------------- action_queue
 function enqueueAction({ type, payload, managerPhone, companyId }) {
   db.prepare(`
@@ -147,6 +159,13 @@ function getQueueItem(id) {
 function markActioned(id, { actionedBy, note }) {
   db.prepare(`
     UPDATE action_queue SET status = 'actioned', actioned_by = ?, actioned_note = ?, actioned_at = ?
+    WHERE id = ?
+  `).run(actionedBy ?? null, note ?? null, nowMs(), id);
+}
+
+function markIgnored(id, { actionedBy, note }) {
+  db.prepare(`
+    UPDATE action_queue SET status = 'ignored', actioned_by = ?, actioned_note = ?, actioned_at = ?
     WHERE id = ?
   `).run(actionedBy ?? null, note ?? null, nowMs(), id);
 }
@@ -450,8 +469,8 @@ function getLastActiveByPhones(phones) {
 module.exports = {
   db,
   getSession, upsertSession, deleteSession, listSessions,
-  logMessage, recentLog,
-  enqueueAction, getQueue, getQueueItem, markActioned,
+  logMessage, recentLog, getMessagesByPhones,
+  enqueueAction, getQueue, getQueueItem, markActioned, markIgnored,
   addLogbookEntry, getLogbook,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
   getTechnicianByPhone, addTechnicianMedia, getTechnicianMedia, getManagersByCompanyId,
