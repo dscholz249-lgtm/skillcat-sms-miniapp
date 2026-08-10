@@ -143,11 +143,12 @@ function enqueueAction({ type, payload, managerPhone, companyId }) {
 }
 
 function getQueue(status, companyId, managerPhone) {
+  const normalizedPhone = normalizePhone(managerPhone);
   const conditions = [];
   const params = [];
   if (status) { conditions.push('status = ?'); params.push(status); }
   if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
-  if (managerPhone) { conditions.push('manager_phone = ?'); params.push(managerPhone); }
+  if (normalizedPhone) { conditions.push('manager_phone = ?'); params.push(normalizedPhone); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return db.prepare(`SELECT * FROM action_queue ${where} ORDER BY created_at DESC`).all(...params);
 }
@@ -298,9 +299,9 @@ function getCompanyByPhone(phone) {
 
 // ----------------------------------------------------------------- analytics
 function getAnalytics(companyId, managerPhonesStr) {
-  const phones = managerPhonesStr
+  const phones = (managerPhonesStr
     ? managerPhonesStr.split(',').map(p => p.trim()).filter(Boolean)
-    : [];
+    : []).map(normalizePhone).filter(Boolean);
 
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
     .toISOString().slice(0, 10);
@@ -461,14 +462,16 @@ function getGlobalAnalytics() {
 // Covers both managers and technicians — message_log captures all inbound SMS/MMS.
 function getLastActiveByPhones(phones) {
   if (!phones || phones.length === 0) return [];
-  const ph = phones.map(() => '?').join(',');
+  const normalized = phones.map(normalizePhone).filter(Boolean);
+  if (!normalized.length) return [];
+  const ph = normalized.map(() => '?').join(',');
   return db.prepare(`
     SELECT manager_phone AS phone, MAX(created_at) AS last_active_at
     FROM message_log
     WHERE direction = 'in'
       AND manager_phone IN (${ph})
     GROUP BY manager_phone
-  `).all(...phones);
+  `).all(...normalized);
 }
 
 module.exports = {
