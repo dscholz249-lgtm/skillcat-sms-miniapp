@@ -183,7 +183,7 @@ function addLogbookEntry({ employeeId, employeeNameRaw, managerPhone, companyId,
   );
 }
 
-function getLogbook(companyId, managerPhone, technicianId) {
+function getLogbook(companyId, managerPhone, technicianId, selfOnly = false) {
   const conditions = [];
   const params = [];
   if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
@@ -191,6 +191,10 @@ function getLogbook(companyId, managerPhone, technicianId) {
     // Technician's own entries only — manager_phone = '' marks technician-originated entries
     conditions.push("employee_id = ? AND manager_phone = ''");
     params.push(technicianId);
+  } else if (selfOnly && managerPhone) {
+    // Manager's own self-submitted entries only (no employee attached)
+    conditions.push("manager_phone = ? AND employee_id IS NULL AND employee_name_raw IS NULL");
+    params.push(managerPhone);
   } else if (managerPhone) {
     // Manager's own entries + technician-originated entries (visible company-wide)
     conditions.push("(manager_phone = ? OR manager_phone = '')");
