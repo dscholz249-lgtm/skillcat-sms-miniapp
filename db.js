@@ -76,6 +76,29 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS phone_link_requests (
+    token       TEXT PRIMARY KEY,
+    phone       TEXT NOT NULL,
+    email       TEXT NOT NULL,
+    employee_id TEXT NOT NULL,
+    company_id  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS alerts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    type       TEXT NOT NULL,
+    title      TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    company_id TEXT,
+    metadata   TEXT,
+    read_at    INTEGER,
+    created_at INTEGER NOT NULL
+  );
+`);
+
 // Safe migrations for existing databases
 try { db.exec('ALTER TABLE employees ADD COLUMN company_name TEXT'); } catch (_) {}
 
@@ -458,6 +481,54 @@ function getGlobalAnalytics() {
   };
 }
 
+// ----------------------------------------------------------------- phone_link_requests
+function createPhoneLinkRequest({ token, phone, email, employeeId, companyId }) {
+  const createdAt = nowMs();
+  const expiresAt = createdAt + 24 * 60 * 60 * 1000; // 24 hours
+  db.prepare(`
+    INSERT INTO phone_link_requests (token, phone, email, employee_id, company_id, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(token, phone, email, employeeId, companyId, createdAt, expiresAt);
+}
+
+function getPhoneLinkRequest(token) {
+  return db.prepare('SELECT * FROM phone_link_requests WHERE token = ?').get(token) || null;
+}
+
+function deletePhoneLinkRequest(token) {
+  db.prepare('DELETE FROM phone_link_requests WHERE token = ?').run(token);
+}
+
+function findEmployeeByEmail(email) {
+  if (!email) return null;
+  return db.prepare("SELECT * FROM employees WHERE LOWER(email) = LOWER(?) LIMIT 1").get(email) || null;
+}
+
+function updateEmployeePhone(employeeId, phone) {
+  db.prepare('UPDATE employees SET phone = ? WHERE id = ?').run(phone, employeeId);
+}
+
+// ----------------------------------------------------------------- alerts
+function createAlert({ type, title, body, companyId = null, metadata = null }) {
+  db.prepare(`
+    INSERT INTO alerts (type, title, body, company_id, metadata, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(type, title, body, companyId, metadata ? JSON.stringify(metadata) : null, nowMs());
+}
+
+function getAlerts(companyId, includeRead = false) {
+  if (companyId) {
+    const where = includeRead ? 'WHERE company_id = ?' : 'WHERE company_id = ? AND read_at IS NULL';
+    return db.prepare(`SELECT * FROM alerts ${where} ORDER BY created_at DESC LIMIT 50`).all(companyId);
+  }
+  const where = includeRead ? '' : 'WHERE read_at IS NULL';
+  return db.prepare(`SELECT * FROM alerts ${where} ORDER BY created_at DESC LIMIT 50`).all();
+}
+
+function markAlertRead(id) {
+  db.prepare('UPDATE alerts SET read_at = ? WHERE id = ?').run(nowMs(), id);
+}
+
 // Returns the most recent inbound message timestamp for each phone in the list.
 // Covers both managers and technicians — message_log captures all inbound SMS/MMS.
 function getLastActiveByPhones(phones) {
@@ -483,4 +554,7 @@ module.exports = {
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
   getTechnicianByPhone, addTechnicianMedia, getTechnicianMedia, getManagersByCompanyId,
   getAnalytics, getGlobalAnalytics, getLastActiveByPhones,
+  createPhoneLinkRequest, getPhoneLinkRequest, deletePhoneLinkRequest,
+  findEmployeeByEmail, updateEmployeePhone,
+  createAlert, getAlerts, markAlertRead,
 };

@@ -19,6 +19,8 @@ const {
   getQueue, getQueueItem, markActioned, markIgnored,
   getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
   getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
+  getPhoneLinkRequest, deletePhoneLinkRequest, updateEmployeePhone,
+  createAlert, getAlerts, markAlertRead,
 } = require('./db');
 
 const app = express();
@@ -223,6 +225,59 @@ app.get('/api/technician-media', (req, res) => {
   const technicianPhone = req.query.technician_phone || null;
   if (!companyId) return res.status(400).json({ error: 'company_id required' });
   res.json(getTechnicianMedia(companyId, technicianId, technicianPhone));
+});
+
+// ----------------------------------------------------------------- PHONE LINK
+app.get('/api/phone-link/:token', (req, res) => {
+  const request = getPhoneLinkRequest(req.params.token);
+  if (!request) return res.status(404).json({ error: 'not found' });
+  if (request.expires_at < Date.now()) {
+    deletePhoneLinkRequest(req.params.token);
+    return res.status(410).json({ error: 'expired' });
+  }
+  res.json(request);
+});
+
+app.post('/api/phone-link/:token/confirm', (req, res) => {
+  const request = getPhoneLinkRequest(req.params.token);
+  if (!request) return res.status(404).json({ error: 'not found' });
+  if (request.expires_at < Date.now()) {
+    deletePhoneLinkRequest(req.params.token);
+    return res.status(410).json({ error: 'expired' });
+  }
+  updateEmployeePhone(request.employee_id, request.phone);
+  deletePhoneLinkRequest(req.params.token);
+  sendSMS(request.phone, `Your phone is now linked to your SkillCat account (${request.email}). Text this number anytime to log updates.`).catch(() => {});
+  logMessage({ phone: request.phone, direction: 'out', body: `Phone linked to ${request.email}`, parsed: null, stepBefore: null, stepAfter: 'phone-link-confirmed' });
+  res.json({ ok: true, employeeId: request.employee_id });
+});
+
+app.post('/api/phone-link/:token/deny', (req, res) => {
+  const request = getPhoneLinkRequest(req.params.token);
+  if (!request) return res.status(404).json({ error: 'not found' });
+  deletePhoneLinkRequest(req.params.token);
+  createAlert({
+    type: 'phone_link_denied',
+    title: 'Unauthorized phone link attempt denied',
+    body: `Someone tried to link ${request.phone} to ${request.email} but the account owner reported it was not them.`,
+    companyId: request.company_id,
+    metadata: { phone: request.phone, email: request.email, employeeId: request.employee_id },
+  });
+  res.json({ ok: true });
+});
+
+// ----------------------------------------------------------------- ALERTS
+app.get('/api/alerts', (req, res) => {
+  const companyId = req.query.company_id || null;
+  const includeRead = req.query.include_read === '1';
+  res.json(getAlerts(companyId, includeRead));
+});
+
+app.post('/api/alerts/:id/read', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'invalid id' });
+  markAlertRead(id);
+  res.json({ ok: true });
 });
 
 // ----------------------------------------------------------------- MEDIA PROXY
