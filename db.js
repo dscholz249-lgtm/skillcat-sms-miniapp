@@ -1,4 +1,5 @@
 const Database = require('better-sqlite3');
+const { upsert, select, configured: supabaseConfigured } = require('./lib/supabase');
 
 const DB_PATH = process.env.DB_PATH || 'miniapp.db';
 const db = new Database(DB_PATH);
@@ -132,13 +133,25 @@ function listSessions() {
 
 // ----------------------------------------------------------------- message_log
 function logMessage({ phone, direction, body, parsed, stepBefore, stepAfter }) {
-  return db.prepare(`
+  const createdAt = now();
+  const result = db.prepare(`
     INSERT INTO message_log (manager_phone, direction, body, parsed_json, step_before, step_after, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     phone, direction, body ?? null, parsed ? JSON.stringify(parsed) : null,
-    stepBefore ?? null, stepAfter ?? null, now(),
-  ).lastInsertRowid;
+    stepBefore ?? null, stepAfter ?? null, createdAt,
+  );
+  upsert('sms_message_log', {
+    id: Number(result.lastInsertRowid),
+    manager_phone: phone,
+    direction,
+    body: body ?? null,
+    parsed_json: parsed ?? null,
+    step_before: stepBefore ?? null,
+    step_after: stepAfter ?? null,
+    created_at: createdAt,
+  });
+  return result.lastInsertRowid;
 }
 
 function recentLog(limit = 100) {
@@ -196,15 +209,27 @@ function markIgnored(id, { actionedBy, note }) {
 
 // ----------------------------------------------------------------- logbook_entries
 function addLogbookEntry({ employeeId, employeeNameRaw, managerPhone, companyId, body, tags, sourceMessageId }) {
-  db.prepare(`
+  const createdAt = nowMs();
+  const result = db.prepare(`
     INSERT INTO logbook_entries
       (employee_id, employee_name_raw, manager_phone, company_id, body, tags, source_message_id, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     employeeId ?? null, employeeNameRaw ?? null, managerPhone,
     companyId ?? null, body, JSON.stringify(tags || []),
-    sourceMessageId ?? null, nowMs(),
+    sourceMessageId ?? null, createdAt,
   );
+  upsert('sms_logbook_entries', {
+    id: Number(result.lastInsertRowid),
+    employee_id: employeeId ?? null,
+    employee_name_raw: employeeNameRaw ?? null,
+    manager_phone: managerPhone,
+    company_id: companyId ?? null,
+    body,
+    tags: tags || [],
+    source_message_id: sourceMessageId ?? null,
+    created_at: createdAt,
+  });
 }
 
 function getLogbook(companyId, managerPhone, technicianId, selfOnly = false) {
@@ -267,10 +292,23 @@ function getTechnicianByPhone(phone) {
 }
 
 function addTechnicianMedia({ technicianId, technicianName, technicianPhone, companyId, mediaUrl, mediaContentType, caption }) {
-  return db.prepare(`
+  const createdAt = nowMs();
+  const result = db.prepare(`
     INSERT INTO technician_media (technician_id, technician_name, technician_phone, company_id, media_url, media_content_type, caption, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(technicianId ?? null, technicianName ?? null, technicianPhone, companyId ?? null, mediaUrl, mediaContentType ?? null, caption ?? null, nowMs());
+  `).run(technicianId ?? null, technicianName ?? null, technicianPhone, companyId ?? null, mediaUrl, mediaContentType ?? null, caption ?? null, createdAt);
+  upsert('sms_technician_media', {
+    id: Number(result.lastInsertRowid),
+    technician_id: technicianId ?? null,
+    technician_name: technicianName ?? null,
+    technician_phone: technicianPhone,
+    company_id: companyId ?? null,
+    media_url: mediaUrl,
+    media_content_type: mediaContentType ?? null,
+    caption: caption ?? null,
+    created_at: createdAt,
+  });
+  return result;
 }
 
 function getTechnicianMedia(companyId, technicianId, technicianPhone) {
@@ -545,6 +583,87 @@ function getLastActiveByPhones(phones) {
   `).all(...normalized);
 }
 
+// ----------------------------------------------------------------- startup seed
+// Called once at boot. If a critical SQLite table is empty (fresh container
+// after a Railway restart), pulls all rows from Supabase and inserts them.
+// Runs synchronously-ish via await so the HTTP server doesn't open until done.
+async function seedFromSupabase() {
+  if (!supabaseConfigured()) {
+    console.log('[seed] Supabase not configured — skipping seed');
+    return;
+  }
+
+  const logbookCount = db.prepare('SELECT COUNT(*) AS n FROM logbook_entries').get().n;
+  const mediaCount   = db.prepare('SELECT COUNT(*) AS n FROM technician_media').get().n;
+  const msgCount     = db.prepare('SELECT COUNT(*) AS n FROM message_log').get().n;
+
+  const needs = { logbook: logbookCount === 0, media: mediaCount === 0, messages: msgCount === 0 };
+  if (!needs.logbook && !needs.media && !needs.messages) {
+    console.log('[seed] SQLite tables populated — skipping seed');
+    return;
+  }
+
+  console.log('[seed] Fresh container detected — seeding from Supabase...');
+
+  if (needs.logbook) {
+    const rows = await select('sms_logbook_entries', { order: 'created_at.asc' });
+    if (rows.length) {
+      const ins = db.prepare(`
+        INSERT OR IGNORE INTO logbook_entries
+          (id, employee_id, employee_name_raw, manager_phone, company_id, body, tags, source_message_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      db.transaction((rs) => {
+        for (const r of rs) {
+          ins.run(r.id, r.employee_id, r.employee_name_raw, r.manager_phone,
+            r.company_id, r.body, JSON.stringify(r.tags ?? []), r.source_message_id, r.created_at);
+        }
+      })(rows);
+      console.log(`[seed] logbook_entries: ${rows.length} rows restored`);
+    }
+  }
+
+  if (needs.media) {
+    const rows = await select('sms_technician_media', { order: 'created_at.asc' });
+    if (rows.length) {
+      const ins = db.prepare(`
+        INSERT OR IGNORE INTO technician_media
+          (id, technician_id, technician_name, technician_phone, company_id, media_url, media_content_type, caption, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      db.transaction((rs) => {
+        for (const r of rs) {
+          ins.run(r.id, r.technician_id, r.technician_name, r.technician_phone,
+            r.company_id, r.media_url, r.media_content_type, r.caption, r.created_at);
+        }
+      })(rows);
+      console.log(`[seed] technician_media: ${rows.length} rows restored`);
+    }
+  }
+
+  if (needs.messages) {
+    // Cap message log seed at 10 000 most recent rows to keep startup fast.
+    const rows = await select('sms_message_log', { order: 'created_at.desc', limit: 10000 });
+    if (rows.length) {
+      const ins = db.prepare(`
+        INSERT OR IGNORE INTO message_log
+          (id, manager_phone, direction, body, parsed_json, step_before, step_after, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      db.transaction((rs) => {
+        for (const r of rs) {
+          ins.run(r.id, r.manager_phone, r.direction, r.body,
+            r.parsed_json ? JSON.stringify(r.parsed_json) : null,
+            r.step_before, r.step_after, r.created_at);
+        }
+      })(rows);
+      console.log(`[seed] message_log: ${rows.length} rows restored`);
+    }
+  }
+
+  console.log('[seed] Seed complete');
+}
+
 module.exports = {
   db,
   getSession, upsertSession, deleteSession, listSessions,
@@ -557,4 +676,5 @@ module.exports = {
   createPhoneLinkRequest, getPhoneLinkRequest, deletePhoneLinkRequest,
   findEmployeeByEmail, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
+  seedFromSupabase,
 };

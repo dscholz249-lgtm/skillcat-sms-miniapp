@@ -21,6 +21,7 @@ const {
   getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
   getPhoneLinkRequest, deletePhoneLinkRequest, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
+  seedFromSupabase,
 } = require('./db');
 
 const app = express();
@@ -310,13 +311,20 @@ app.get('/api/media-proxy', async (req, res) => {
 // 404 fallthrough
 app.use((req, res) => res.status(404).json({ error: 'not found', path: req.path }));
 
-app.listen(PORT, () => {
-  console.log(`[logbook] http://0.0.0.0:${PORT}`);
-  initReminders();
-  if (!process.env.TWILIO_AUTH_TOKEN) console.warn('[logbook] WARNING: TWILIO_AUTH_TOKEN unset — signature validation disabled');
-  if (!process.env.TWILIO_MESSAGING_SERVICE_SID) console.warn('[logbook] WARNING: TWILIO_MESSAGING_SERVICE_SID unset — outbound SMS logs to console only');
-  if (!process.env.ANTHROPIC_API_KEY) console.warn('[logbook] WARNING: ANTHROPIC_API_KEY unset — NL parse will always return unclear');
-  startupRosterSync();
+// Seed SQLite from Supabase before opening the port so no Twilio webhook
+// arrives against an empty database after a Railway container restart.
+seedFromSupabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`[logbook] http://0.0.0.0:${PORT}`);
+    initReminders();
+    if (!process.env.TWILIO_AUTH_TOKEN) console.warn('[logbook] WARNING: TWILIO_AUTH_TOKEN unset — signature validation disabled');
+    if (!process.env.TWILIO_MESSAGING_SERVICE_SID) console.warn('[logbook] WARNING: TWILIO_MESSAGING_SERVICE_SID unset — outbound SMS logs to console only');
+    if (!process.env.ANTHROPIC_API_KEY) console.warn('[logbook] WARNING: ANTHROPIC_API_KEY unset — NL parse will always return unclear');
+    startupRosterSync();
+  });
+}).catch(err => {
+  console.error('[logbook] Fatal: seed failed —', err.message);
+  process.exit(1);
 });
 
 // Re-populate SQLite from Next.js after Railway restarts wipe the ephemeral
