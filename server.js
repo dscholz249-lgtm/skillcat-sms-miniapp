@@ -21,8 +21,11 @@ const {
   getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
   getPhoneLinkRequest, deletePhoneLinkRequest, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
+  createBroadcast, getBroadcastByIdempotencyKey, completeBroadcast,
+  listBroadcasts, getBroadcast, getOptedOutPhones,
   seedFromSupabase,
 } = require('./db');
+const { drainBroadcast, resumeInterruptedBroadcasts, withOptOutFooter } = require('./lib/broadcast');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -281,6 +284,71 @@ app.post('/api/alerts/:id/read', (req, res) => {
   res.json({ ok: true });
 });
 
+// ----------------------------------------------------------------- BROADCASTS
+const MAX_BROADCAST_BODY = 1200;
+
+app.post('/api/broadcast', (req, res) => {
+  const { body, sent_by, recipients, filter, idempotency_key } = req.body || {};
+
+  if (typeof body !== 'string' || !body.trim()) {
+    return res.status(400).json({ error: 'body required' });
+  }
+  if (body.length > MAX_BROADCAST_BODY) {
+    return res.status(400).json({ error: `body exceeds ${MAX_BROADCAST_BODY} characters` });
+  }
+  if (!sent_by) return res.status(400).json({ error: 'sent_by required' });
+  if (!Array.isArray(recipients) || recipients.length === 0) {
+    return res.status(400).json({ error: 'recipients required' });
+  }
+
+  // Replaying the same key returns the original broadcast instead of sending
+  // again — a double-clicked Send button must not double-text the whole list.
+  if (idempotency_key) {
+    const existing = getBroadcastByIdempotencyKey(idempotency_key);
+    if (existing) {
+      return res.json({ broadcast_id: existing.id, queued: existing.recipient_count, excluded_opt_out: 0, replayed: true });
+    }
+  }
+
+  const { broadcast, excluded_opt_out } = createBroadcast({
+    body: withOptOutFooter(body),
+    sentBy: sent_by,
+    filterJson: filter ?? null,
+    recipients,
+    idempotencyKey: idempotency_key ?? null,
+  });
+
+  if (broadcast.recipient_count === 0) {
+    completeBroadcast(broadcast.id);
+    return res.json({ broadcast_id: broadcast.id, queued: 0, excluded_opt_out });
+  }
+
+  // Fire and forget — the dashboard polls the broadcast record for progress.
+  drainBroadcast(broadcast.id).catch(err => console.error('[broadcast] drain failed', err));
+
+  res.json({ broadcast_id: broadcast.id, queued: broadcast.recipient_count, excluded_opt_out });
+});
+
+app.get('/api/broadcasts', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  res.json(listBroadcasts(limit));
+});
+
+app.get('/api/broadcasts/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'invalid id' });
+  const broadcast = getBroadcast(id);
+  if (!broadcast) return res.status(404).json({ error: 'not found' });
+  res.json(broadcast);
+});
+
+// Which of the given phones are opted out — lets the composer show exclusions
+// before anyone hits Send.
+app.get('/api/opt-outs', (req, res) => {
+  const phones = (req.query.phones || '').split(',').map(p => p.trim()).filter(Boolean);
+  res.json(getOptedOutPhones(phones));
+});
+
 // ----------------------------------------------------------------- MEDIA PROXY
 // Fetches a Twilio media URL using Basic auth so the Next.js layer can serve
 // the image without embedding Twilio credentials in the browser.
@@ -321,6 +389,7 @@ seedFromSupabase().then(() => {
     if (!process.env.TWILIO_MESSAGING_SERVICE_SID) console.warn('[logbook] WARNING: TWILIO_MESSAGING_SERVICE_SID unset — outbound SMS logs to console only');
     if (!process.env.ANTHROPIC_API_KEY) console.warn('[logbook] WARNING: ANTHROPIC_API_KEY unset — NL parse will always return unclear');
     startupRosterSync();
+    resumeInterruptedBroadcasts();
   });
 }).catch(err => {
   console.error('[logbook] Fatal: seed failed —', err.message);

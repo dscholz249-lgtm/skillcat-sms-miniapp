@@ -100,6 +100,50 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS broadcasts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    body            TEXT NOT NULL,
+    sent_by         TEXT NOT NULL,
+    filter_json     TEXT,
+    recipient_count INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'sending',
+    idempotency_key TEXT UNIQUE,
+    created_at      INTEGER NOT NULL,
+    completed_at    INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS broadcast_recipients (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    broadcast_id   INTEGER NOT NULL,
+    employee_id    TEXT,
+    phone          TEXT NOT NULL,
+    name           TEXT,
+    company_id     TEXT,
+    company_name   TEXT,
+    status         TEXT NOT NULL DEFAULT 'queued',
+    twilio_sid     TEXT,
+    error_code     TEXT,
+    message_log_id INTEGER,
+    sent_at        INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_broadcast_recipients_bid
+    ON broadcast_recipients (broadcast_id);
+
+  -- Opt-outs live in their own table, NOT on employees: ingestSnapshot() uses
+  -- INSERT OR REPLACE, which would silently null out any column it doesn't
+  -- list every time a company is saved in the dashboard.
+  -- Rows are never deleted (the Supabase mirror is upsert-only) — a START/UNSTOP
+  -- sets cleared_at instead, and "opted out" means cleared_at IS NULL.
+  CREATE TABLE IF NOT EXISTS sms_opt_outs (
+    phone        TEXT PRIMARY KEY,
+    opted_out_at INTEGER NOT NULL,
+    cleared_at   INTEGER,
+    source       TEXT NOT NULL DEFAULT 'stop_keyword'
+  );
+`);
+
 // Safe migrations for existing databases
 try { db.exec('ALTER TABLE employees ADD COLUMN company_name TEXT'); } catch (_) {}
 
@@ -168,6 +212,177 @@ function getMessagesByPhones(phones) {
       AND body != '(parsed)'
     ORDER BY created_at ASC
   `).all(...phones);
+}
+
+// ----------------------------------------------------------------- opt-outs
+function recordOptOut(phone, source = 'stop_keyword') {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return;
+  const optedOutAt = nowMs();
+  db.prepare(`
+    INSERT INTO sms_opt_outs (phone, opted_out_at, cleared_at, source)
+    VALUES (?, ?, NULL, ?)
+    ON CONFLICT(phone) DO UPDATE SET
+      opted_out_at = excluded.opted_out_at,
+      cleared_at   = NULL,
+      source       = excluded.source
+  `).run(normalized, optedOutAt, source);
+  upsert('sms_opt_outs', { phone: normalized, opted_out_at: optedOutAt, cleared_at: null, source });
+  console.log(`[opt-out] ${normalized} opted out (${source})`);
+}
+
+function clearOptOut(phone) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return;
+  const row = db.prepare('SELECT * FROM sms_opt_outs WHERE phone = ?').get(normalized);
+  if (!row || row.cleared_at !== null) return;
+  const clearedAt = nowMs();
+  db.prepare('UPDATE sms_opt_outs SET cleared_at = ? WHERE phone = ?').run(clearedAt, normalized);
+  upsert('sms_opt_outs', { ...row, phone: normalized, cleared_at: clearedAt });
+  console.log(`[opt-out] ${normalized} opted back in`);
+}
+
+// Returns the subset of `phones` that are currently opted out (normalized).
+function getOptedOutPhones(phones) {
+  const normalized = (phones || []).map(normalizePhone).filter(Boolean);
+  if (!normalized.length) return [];
+  const ph = normalized.map(() => '?').join(',');
+  return db.prepare(`
+    SELECT phone FROM sms_opt_outs
+    WHERE phone IN (${ph}) AND cleared_at IS NULL
+  `).all(...normalized).map(r => r.phone);
+}
+
+// ----------------------------------------------------------------- broadcasts
+function getBroadcastByIdempotencyKey(key) {
+  if (!key) return null;
+  return db.prepare('SELECT * FROM broadcasts WHERE idempotency_key = ?').get(key) || null;
+}
+
+// Creates the broadcast and its recipient rows in one transaction. Opted-out
+// numbers are dropped here rather than trusting the caller's list, so the API
+// is safe no matter what the dashboard sends.
+function createBroadcast({ body, sentBy, filterJson, recipients, idempotencyKey }) {
+  const optedOut = new Set(getOptedOutPhones((recipients || []).map(r => r.phone)));
+  const seen = new Set();
+  const eligible = [];
+  for (const r of recipients || []) {
+    const phone = normalizePhone(r.phone);
+    if (!phone || optedOut.has(phone) || seen.has(phone)) continue;
+    seen.add(phone);
+    eligible.push({ ...r, phone });
+  }
+
+  const createdAt = nowMs();
+  const insertBroadcast = db.prepare(`
+    INSERT INTO broadcasts (body, sent_by, filter_json, recipient_count, status, idempotency_key, created_at)
+    VALUES (?, ?, ?, ?, 'sending', ?, ?)
+  `);
+  const insertRecipient = db.prepare(`
+    INSERT INTO broadcast_recipients
+      (broadcast_id, employee_id, phone, name, company_id, company_name, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'queued')
+  `);
+
+  const run = db.transaction(() => {
+    const result = insertBroadcast.run(
+      body, sentBy, filterJson ? JSON.stringify(filterJson) : null,
+      eligible.length, idempotencyKey ?? null, createdAt,
+    );
+    const broadcastId = Number(result.lastInsertRowid);
+    for (const r of eligible) {
+      insertRecipient.run(broadcastId, r.employee_id ?? null, r.phone,
+        r.name ?? null, r.company_id ?? null, r.company_name ?? null);
+    }
+    return broadcastId;
+  });
+
+  const broadcastId = run();
+  const broadcast = db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(broadcastId);
+  mirrorBroadcast(broadcastId);
+  // Mirror the queued recipients up front, so an interrupted send is still
+  // recoverable from Supabase if the container is replaced mid-drain.
+  upsert('sms_broadcast_recipients',
+    db.prepare('SELECT * FROM broadcast_recipients WHERE broadcast_id = ?').all(broadcastId));
+  return {
+    broadcast,
+    excluded_opt_out: (recipients || []).length - eligible.length,
+  };
+}
+
+function getQueuedRecipients(broadcastId) {
+  return db.prepare(`
+    SELECT * FROM broadcast_recipients
+    WHERE broadcast_id = ? AND status = 'queued'
+    ORDER BY id ASC
+  `).all(broadcastId);
+}
+
+function markRecipientSent(id, { twilioSid, messageLogId }) {
+  db.prepare(`
+    UPDATE broadcast_recipients
+    SET status = 'sent', twilio_sid = ?, message_log_id = ?, sent_at = ?
+    WHERE id = ?
+  `).run(twilioSid ?? null, messageLogId ?? null, nowMs(), id);
+  mirrorRecipient(id);
+}
+
+function markRecipientFailed(id, errorCode) {
+  db.prepare(`
+    UPDATE broadcast_recipients
+    SET status = 'failed', error_code = ?, sent_at = ?
+    WHERE id = ?
+  `).run(errorCode ? String(errorCode) : null, nowMs(), id);
+  mirrorRecipient(id);
+}
+
+function completeBroadcast(broadcastId) {
+  const completedAt = nowMs();
+  db.prepare("UPDATE broadcasts SET status = 'complete', completed_at = ? WHERE id = ?")
+    .run(completedAt, broadcastId);
+  mirrorBroadcast(broadcastId);
+}
+
+function listBroadcasts(limit = 50) {
+  return db.prepare(`
+    SELECT b.*,
+      (SELECT COUNT(*) FROM broadcast_recipients r WHERE r.broadcast_id = b.id AND r.status = 'sent')   AS sent_count,
+      (SELECT COUNT(*) FROM broadcast_recipients r WHERE r.broadcast_id = b.id AND r.status = 'failed') AS failed_count,
+      (SELECT COUNT(*) FROM broadcast_recipients r WHERE r.broadcast_id = b.id AND r.status = 'queued') AS queued_count
+    FROM broadcasts b
+    ORDER BY b.created_at DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+function getBroadcast(id) {
+  const broadcast = db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(id);
+  if (!broadcast) return null;
+  const recipients = db.prepare(
+    'SELECT * FROM broadcast_recipients WHERE broadcast_id = ? ORDER BY name IS NULL, name ASC'
+  ).all(id);
+  return { ...broadcast, recipients };
+}
+
+// Any broadcast still 'sending' at boot was interrupted by a container restart.
+// Returns their ids so the caller can resume the queued recipients.
+function findInterruptedBroadcasts() {
+  return db.prepare("SELECT id FROM broadcasts WHERE status = 'sending' ORDER BY id ASC")
+    .all().map(r => r.id);
+}
+
+function mirrorBroadcast(id) {
+  const row = db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(id);
+  if (!row) return;
+  upsert('sms_broadcasts', {
+    ...row,
+    filter_json: row.filter_json ? JSON.parse(row.filter_json) : null,
+  });
+}
+
+function mirrorRecipient(id) {
+  const row = db.prepare('SELECT * FROM broadcast_recipients WHERE id = ?').get(id);
+  if (row) upsert('sms_broadcast_recipients', row);
 }
 
 // ----------------------------------------------------------------- action_queue
@@ -593,12 +808,20 @@ async function seedFromSupabase() {
     return;
   }
 
-  const logbookCount = db.prepare('SELECT COUNT(*) AS n FROM logbook_entries').get().n;
-  const mediaCount   = db.prepare('SELECT COUNT(*) AS n FROM technician_media').get().n;
-  const msgCount     = db.prepare('SELECT COUNT(*) AS n FROM message_log').get().n;
+  const logbookCount   = db.prepare('SELECT COUNT(*) AS n FROM logbook_entries').get().n;
+  const mediaCount     = db.prepare('SELECT COUNT(*) AS n FROM technician_media').get().n;
+  const msgCount       = db.prepare('SELECT COUNT(*) AS n FROM message_log').get().n;
+  const broadcastCount = db.prepare('SELECT COUNT(*) AS n FROM broadcasts').get().n;
+  const optOutCount    = db.prepare('SELECT COUNT(*) AS n FROM sms_opt_outs').get().n;
 
-  const needs = { logbook: logbookCount === 0, media: mediaCount === 0, messages: msgCount === 0 };
-  if (!needs.logbook && !needs.media && !needs.messages) {
+  const needs = {
+    logbook: logbookCount === 0,
+    media: mediaCount === 0,
+    messages: msgCount === 0,
+    broadcasts: broadcastCount === 0,
+    optOuts: optOutCount === 0,
+  };
+  if (!needs.logbook && !needs.media && !needs.messages && !needs.broadcasts && !needs.optOuts) {
     console.log('[seed] SQLite tables populated — skipping seed');
     return;
   }
@@ -661,6 +884,59 @@ async function seedFromSupabase() {
     }
   }
 
+  // Opt-outs are restored first and unconditionally — sending to someone who
+  // texted STOP because their row was still in flight is the one mistake here
+  // that cannot be walked back.
+  if (needs.optOuts) {
+    const rows = await select('sms_opt_outs', { order: 'opted_out_at.asc' });
+    if (rows.length) {
+      const ins = db.prepare(`
+        INSERT OR IGNORE INTO sms_opt_outs (phone, opted_out_at, cleared_at, source)
+        VALUES (?, ?, ?, ?)
+      `);
+      db.transaction((rs) => {
+        for (const r of rs) ins.run(r.phone, r.opted_out_at, r.cleared_at ?? null, r.source);
+      })(rows);
+      console.log(`[seed] sms_opt_outs: ${rows.length} rows restored`);
+    }
+  }
+
+  if (needs.broadcasts) {
+    const rows = await select('sms_broadcasts', { order: 'created_at.asc' });
+    if (rows.length) {
+      const ins = db.prepare(`
+        INSERT OR IGNORE INTO broadcasts
+          (id, body, sent_by, filter_json, recipient_count, status, idempotency_key, created_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      db.transaction((rs) => {
+        for (const r of rs) {
+          ins.run(r.id, r.body, r.sent_by,
+            r.filter_json ? JSON.stringify(r.filter_json) : null,
+            r.recipient_count, r.status, r.idempotency_key, r.created_at, r.completed_at);
+        }
+      })(rows);
+      console.log(`[seed] broadcasts: ${rows.length} rows restored`);
+    }
+
+    const recipientRows = await select('sms_broadcast_recipients', { order: 'id.asc' });
+    if (recipientRows.length) {
+      const ins = db.prepare(`
+        INSERT OR IGNORE INTO broadcast_recipients
+          (id, broadcast_id, employee_id, phone, name, company_id, company_name,
+           status, twilio_sid, error_code, message_log_id, sent_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      db.transaction((rs) => {
+        for (const r of rs) {
+          ins.run(r.id, r.broadcast_id, r.employee_id, r.phone, r.name, r.company_id,
+            r.company_name, r.status, r.twilio_sid, r.error_code, r.message_log_id, r.sent_at);
+        }
+      })(recipientRows);
+      console.log(`[seed] broadcast_recipients: ${recipientRows.length} rows restored`);
+    }
+  }
+
   console.log('[seed] Seed complete');
 }
 
@@ -676,5 +952,9 @@ module.exports = {
   createPhoneLinkRequest, getPhoneLinkRequest, deletePhoneLinkRequest,
   findEmployeeByEmail, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
+  recordOptOut, clearOptOut, getOptedOutPhones,
+  createBroadcast, getBroadcastByIdempotencyKey, getQueuedRecipients,
+  markRecipientSent, markRecipientFailed, completeBroadcast,
+  listBroadcasts, getBroadcast, findInterruptedBroadcasts,
   seedFromSupabase,
 };
