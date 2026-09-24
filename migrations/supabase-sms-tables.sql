@@ -94,12 +94,16 @@ CREATE INDEX IF NOT EXISTS idx_sms_broadcast_recipients_bid ON sms_broadcast_rec
 -- with INSERT OR REPLACE on every company save, which would wipe the flag.
 -- Rows are never deleted; a START/UNSTOP sets cleared_at.
 CREATE TABLE IF NOT EXISTS sms_opt_outs (
-  phone        TEXT PRIMARY KEY,
-  opted_out_at BIGINT NOT NULL,
-  cleared_at   BIGINT,
-  source       TEXT NOT NULL DEFAULT 'stop_keyword',
-  synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  phone         TEXT PRIMARY KEY,
+  opted_out_at  BIGINT NOT NULL,
+  cleared_at    BIGINT,
+  source        TEXT NOT NULL DEFAULT 'stop_keyword',
+  email_sent_at BIGINT,
+  synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Added for PRD-235 (opt-out notifications). Safe to re-run.
+ALTER TABLE sms_opt_outs ADD COLUMN IF NOT EXISTS email_sent_at BIGINT;
 
 -- ----------------------------------------------------------------- RLS
 -- The miniapp uses the service role key so these policies don't affect it,

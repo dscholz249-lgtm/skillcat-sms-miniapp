@@ -137,15 +137,17 @@ db.exec(`
   -- Rows are never deleted (the Supabase mirror is upsert-only) — a START/UNSTOP
   -- sets cleared_at instead, and "opted out" means cleared_at IS NULL.
   CREATE TABLE IF NOT EXISTS sms_opt_outs (
-    phone        TEXT PRIMARY KEY,
-    opted_out_at INTEGER NOT NULL,
-    cleared_at   INTEGER,
-    source       TEXT NOT NULL DEFAULT 'stop_keyword'
+    phone         TEXT PRIMARY KEY,
+    opted_out_at  INTEGER NOT NULL,
+    cleared_at    INTEGER,
+    source        TEXT NOT NULL DEFAULT 'stop_keyword',
+    email_sent_at INTEGER
   );
 `);
 
 // Safe migrations for existing databases
 try { db.exec('ALTER TABLE employees ADD COLUMN company_name TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE sms_opt_outs ADD COLUMN email_sent_at INTEGER'); } catch (_) {}
 
 function now() { return new Date().toISOString(); }
 function nowMs() { return Date.now(); }
@@ -237,9 +239,35 @@ function clearOptOut(phone) {
   const row = db.prepare('SELECT * FROM sms_opt_outs WHERE phone = ?').get(normalized);
   if (!row || row.cleared_at !== null) return;
   const clearedAt = nowMs();
-  db.prepare('UPDATE sms_opt_outs SET cleared_at = ? WHERE phone = ?').run(clearedAt, normalized);
-  upsert('sms_opt_outs', { ...row, phone: normalized, cleared_at: clearedAt });
+  // email_sent_at resets too: if they opt out again later, that is a new event
+  // and deserves a new notification.
+  db.prepare('UPDATE sms_opt_outs SET cleared_at = ?, email_sent_at = NULL WHERE phone = ?')
+    .run(clearedAt, normalized);
+  upsert('sms_opt_outs', { ...row, phone: normalized, cleared_at: clearedAt, email_sent_at: null });
   console.log(`[opt-out] ${normalized} opted back in`);
+}
+
+function getOptOut(phone) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+  return db.prepare('SELECT * FROM sms_opt_outs WHERE phone = ?').get(normalized) || null;
+}
+
+function markOptOutEmailSent(phone) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return;
+  const sentAt = nowMs();
+  db.prepare('UPDATE sms_opt_outs SET email_sent_at = ? WHERE phone = ?').run(sentAt, normalized);
+  const row = db.prepare('SELECT * FROM sms_opt_outs WHERE phone = ?').get(normalized);
+  if (row) upsert('sms_opt_outs', row);
+}
+
+// Role-agnostic lookup — the opt-out flow has to reach technicians and
+// managers alike, and the existing helpers are split by title.
+function getEmployeeByPhone(phone) {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+  return db.prepare('SELECT * FROM employees WHERE phone = ? LIMIT 1').get(normalized) || null;
 }
 
 // Returns the subset of `phones` that are currently opted out (normalized).
@@ -891,11 +919,13 @@ async function seedFromSupabase() {
     const rows = await select('sms_opt_outs', { order: 'opted_out_at.asc' });
     if (rows.length) {
       const ins = db.prepare(`
-        INSERT OR IGNORE INTO sms_opt_outs (phone, opted_out_at, cleared_at, source)
-        VALUES (?, ?, ?, ?)
+        INSERT OR IGNORE INTO sms_opt_outs (phone, opted_out_at, cleared_at, source, email_sent_at)
+        VALUES (?, ?, ?, ?, ?)
       `);
       db.transaction((rs) => {
-        for (const r of rs) ins.run(r.phone, r.opted_out_at, r.cleared_at ?? null, r.source);
+        for (const r of rs) {
+          ins.run(r.phone, r.opted_out_at, r.cleared_at ?? null, r.source, r.email_sent_at ?? null);
+        }
       })(rows);
       console.log(`[seed] sms_opt_outs: ${rows.length} rows restored`);
     }
@@ -953,6 +983,7 @@ module.exports = {
   findEmployeeByEmail, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
   recordOptOut, clearOptOut, getOptedOutPhones,
+  getOptOut, markOptOutEmailSent, getEmployeeByPhone,
   createBroadcast, getBroadcastByIdempotencyKey, getQueuedRecipients,
   markRecipientSent, markRecipientFailed, completeBroadcast,
   listBroadcasts, getBroadcast, findInterruptedBroadcasts,
