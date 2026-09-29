@@ -131,6 +131,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_broadcast_recipients_bid
     ON broadcast_recipients (broadcast_id);
 
+  -- Inbound lookup: "was this number sent a broadcast recently?" runs on every
+  -- unparseable manager message, so it needs the phone leading the index.
+  CREATE INDEX IF NOT EXISTS idx_broadcast_recipients_phone_sent
+    ON broadcast_recipients (phone, sent_at);
+
   -- Opt-outs live in their own table, NOT on employees: ingestSnapshot() uses
   -- INSERT OR REPLACE, which would silently null out any column it doesn't
   -- list every time a company is saved in the dashboard.
@@ -362,6 +367,19 @@ function markRecipientFailed(id, errorCode) {
     WHERE id = ?
   `).run(errorCode ? String(errorCode) : null, nowMs(), id);
   mirrorRecipient(id);
+}
+
+// Was this number sent a broadcast inside the reply window? A manager answering
+// a blast is talking to a person, not issuing a command, so the inbound handler
+// uses this to swap the parse-failure copy for a human acknowledgement.
+// Filtered to status='sent' because markRecipientFailed() stamps sent_at too.
+function wasRecentlyBroadcast(phone, windowMs) {
+  const row = db.prepare(`
+    SELECT 1 FROM broadcast_recipients
+    WHERE phone = ? AND status = 'sent' AND sent_at >= ?
+    LIMIT 1
+  `).get(phone, nowMs() - windowMs);
+  return !!row;
 }
 
 function completeBroadcast(broadcastId) {
@@ -986,6 +1004,6 @@ module.exports = {
   getOptOut, markOptOutEmailSent, getEmployeeByPhone,
   createBroadcast, getBroadcastByIdempotencyKey, getQueuedRecipients,
   markRecipientSent, markRecipientFailed, completeBroadcast,
-  listBroadcasts, getBroadcast, findInterruptedBroadcasts,
+  listBroadcasts, getBroadcast, findInterruptedBroadcasts, wasRecentlyBroadcast,
   seedFromSupabase,
 };
