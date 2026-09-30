@@ -780,6 +780,83 @@ function getGlobalAnalytics() {
   };
 }
 
+/**
+ * Daily counts of the three things that actually move through the system:
+ * images, curriculum lookups, and everything else.
+ *
+ * Returns the finest grain (per UTC day, all history). Monthly / annual /
+ * all-time are rollups of exactly these rows, so the caller aggregates rather
+ * than re-querying — every coarser view is derivable from this one.
+ *
+ * Three sources, because no single table sees all three:
+ *
+ *   images     — technician_media holds one row per photo, but ONLY for
+ *                technicians. handleManagerMedia() never writes there; a
+ *                manager's photos exist only as the media array inside a
+ *                logbook entry body, so that array's length is the count.
+ *                Technician logbook entries are tagged 'mms' too and would
+ *                double-count, which is why the tag filter requires 'manager'.
+ *   curriculum — query_catalog answers inline and returns, so it never reaches
+ *                action_queue. The parsed intent on the inbound message is the
+ *                only record of it. Exactly one row per message carries
+ *                parsed_json (conversation.js writes it once), so a plain
+ *                count is right.
+ *   other      — action_queue: add_employee, assign_training, log_note and
+ *                human_review. Anything a person has to act on.
+ *
+ * The two timestamp formats are not an oversight to fix here: message_log
+ * stores ISO text and the rest store epoch ms. Both are normalised to a UTC
+ * 'YYYY-MM-DD' so the union lines up.
+ *
+ * json_valid is tested inside CASE rather than in WHERE because SQLite does
+ * not promise to evaluate AND terms left to right, and json_extract on a
+ * plain-text logbook body raises rather than returning null.
+ */
+function getRequestActivity() {
+  return db.prepare(`
+    WITH events AS (
+      SELECT date(created_at / 1000, 'unixepoch') AS day,
+             'images' AS category, 1 AS n
+      FROM technician_media
+
+      UNION ALL
+
+      SELECT date(created_at / 1000, 'unixepoch') AS day,
+             'images' AS category,
+             CASE WHEN json_valid(body)
+                  THEN COALESCE(json_array_length(json_extract(body, '$.media')), 0)
+                  ELSE 0 END AS n
+      FROM logbook_entries
+      WHERE tags LIKE '%"manager"%' AND tags LIKE '%"mms"%'
+
+      UNION ALL
+
+      SELECT substr(created_at, 1, 10) AS day,
+             'curriculum' AS category, 1 AS n
+      FROM message_log
+      WHERE parsed_json IS NOT NULL
+        AND CASE WHEN json_valid(parsed_json)
+                 THEN json_extract(parsed_json, '$.intent')
+                 ELSE NULL END = 'query_catalog'
+
+      UNION ALL
+
+      SELECT date(created_at / 1000, 'unixepoch') AS day,
+             'other' AS category, 1 AS n
+      FROM action_queue
+    )
+    SELECT day AS date,
+           SUM(CASE WHEN category = 'images'     THEN n ELSE 0 END) AS images,
+           SUM(CASE WHEN category = 'curriculum' THEN n ELSE 0 END) AS curriculum,
+           SUM(CASE WHEN category = 'other'      THEN n ELSE 0 END) AS other
+    FROM events
+    WHERE day IS NOT NULL
+    GROUP BY day
+    HAVING images + curriculum + other > 0
+    ORDER BY day ASC
+  `).all();
+}
+
 // ----------------------------------------------------------------- phone_link_requests
 function createPhoneLinkRequest({ token, phone, email, employeeId, companyId }) {
   const createdAt = nowMs();
@@ -996,7 +1073,7 @@ module.exports = {
   addLogbookEntry, getLogbook,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
   getTechnicianByPhone, addTechnicianMedia, getTechnicianMedia, getManagersByCompanyId,
-  getAnalytics, getGlobalAnalytics, getLastActiveByPhones,
+  getAnalytics, getGlobalAnalytics, getRequestActivity, getLastActiveByPhones,
   createPhoneLinkRequest, getPhoneLinkRequest, deletePhoneLinkRequest,
   findEmployeeByEmail, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
