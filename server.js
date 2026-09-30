@@ -18,6 +18,7 @@ const {
   listSessions, recentLog,
   getQueue, getQueueItem, markActioned, markIgnored,
   getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
+  getRequestActivity,
   getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
   getPhoneLinkRequest, deletePhoneLinkRequest, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
@@ -148,6 +149,14 @@ app.get('/api/analytics', (req, res) => {
 
 app.get('/api/analytics/global', (_req, res) => {
   res.json(getGlobalAnalytics());
+});
+
+// Per-day counts of images, curriculum lookups and other requests, all
+// history. Deliberately not parameterised by granularity: monthly, annual and
+// all-time are rollups of these same rows, so the dashboard aggregates them
+// client-side and the period toggle costs no round trip.
+app.get('/api/analytics/activity', (_req, res) => {
+  res.json({ daily: getRequestActivity() });
 });
 
 app.get('/api/last-active', (req, res) => {
