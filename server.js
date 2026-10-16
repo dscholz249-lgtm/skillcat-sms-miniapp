@@ -16,7 +16,7 @@ const { COPY } = require('./lib/copy');
 const { capture } = require('./lib/analytics');
 const {
   listSessions, recentLog,
-  getQueue, getQueueItem, markActioned, markIgnored,
+  getQueue, getQueueItem, markActioned, markIgnored, getManagerInfoByPhone,
   getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
   getRequestActivity,
   getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
@@ -96,29 +96,57 @@ app.get('/api/queue', (req, res) => {
   res.json(getQueue(status, companyId, managerPhone));
 });
 
+// Single request, plus the manager's name/company for display (the Slack
+// "Mark complete" link opens a page built from this).
+app.get('/api/queue/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'invalid id' });
+  const item = getQueueItem(id);
+  if (!item) return res.status(404).json({ error: 'not found' });
+  res.json({ ...item, manager: getManagerInfoByPhone(item.manager_phone) });
+});
+
+// 'Slack link' is what the dashboard records when someone completes from the
+// signed Slack link without a session.
+function alreadyCompleted(item) {
+  const by = !item.actioned_by ? ''
+    : item.actioned_by === 'Slack link' ? ' via Slack link'
+    : ` by ${item.actioned_by}`;
+  return {
+    error: `Already completed${by}`,
+    status: item.status,
+    actioned_by: item.actioned_by,
+    actioned_at: item.actioned_at,
+  };
+}
+
+// Completing is final and texts the manager exactly once. A pending or
+// ignored request can be completed; an actioned one returns 409 with who
+// completed it rather than overwriting the record.
 app.post('/api/queue/:id/action', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ error: 'invalid id' });
   const { actioned_by, note } = req.body || {};
   const item = getQueueItem(id);
   if (!item) return res.status(404).json({ error: 'not found' });
-  const alreadyActioned = item.status === 'actioned';
-  markActioned(id, { actionedBy: actioned_by, note });
-  res.json({ ok: true });
-  if (!alreadyActioned) {
-    capture(item.manager_phone, 'request_actioned', { request_type: item.type, company_id: item.company_id });
-    notifyManagerActioned(item).catch(e => console.error('[action] notify failed', e.message));
+  if (!markActioned(id, { actionedBy: actioned_by, note })) {
+    return res.status(409).json(alreadyCompleted(item));
   }
+  res.json({ ok: true });
+  capture(item.manager_phone, 'request_actioned', { request_type: item.type, company_id: item.company_id });
+  notifyManagerActioned(item).catch(e => console.error('[action] notify failed', e.message));
 });
 
+// Ignore only moves a pending request. Ignoring an already-ignored request is
+// a no-op; ignoring a completed one returns 409.
 app.post('/api/queue/:id/ignore', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ error: 'invalid id' });
   const { actioned_by, note } = req.body || {};
   const item = getQueueItem(id);
   if (!item) return res.status(404).json({ error: 'not found' });
-  if (item.status === 'pending') {
-    markIgnored(id, { actionedBy: actioned_by, note });
+  if (item.status === 'actioned') return res.status(409).json(alreadyCompleted(item));
+  if (markIgnored(id, { actionedBy: actioned_by, note })) {
     capture(item.manager_phone, 'request_ignored', { request_type: item.type, company_id: item.company_id });
   }
   res.json({ ok: true });

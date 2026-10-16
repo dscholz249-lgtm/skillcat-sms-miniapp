@@ -432,11 +432,13 @@ function mirrorRecipient(id) {
 }
 
 // ----------------------------------------------------------------- action_queue
+// Returns the new row id so callers can link to the request (Slack).
 function enqueueAction({ type, payload, managerPhone, companyId }) {
-  db.prepare(`
+  const result = db.prepare(`
     INSERT INTO action_queue (type, payload, manager_phone, company_id, status, created_at)
     VALUES (?, ?, ?, ?, 'pending', ?)
   `).run(type, JSON.stringify(payload), managerPhone, companyId ?? null, nowMs());
+  return Number(result.lastInsertRowid);
 }
 
 function getQueue(status, companyId, managerPhone) {
@@ -454,18 +456,24 @@ function getQueueItem(id) {
   return db.prepare('SELECT * FROM action_queue WHERE id = ?').get(id) || null;
 }
 
+// Completing is final: an already-actioned row is never overwritten, so the
+// record keeps whoever completed it first. Ignored rows can still be
+// completed — Ignore only means "seen, not acting yet". Both return true when
+// the row changed.
 function markActioned(id, { actionedBy, note }) {
-  db.prepare(`
+  const result = db.prepare(`
     UPDATE action_queue SET status = 'actioned', actioned_by = ?, actioned_note = ?, actioned_at = ?
-    WHERE id = ?
+    WHERE id = ? AND status != 'actioned'
   `).run(actionedBy ?? null, note ?? null, nowMs(), id);
+  return result.changes > 0;
 }
 
 function markIgnored(id, { actionedBy, note }) {
-  db.prepare(`
+  const result = db.prepare(`
     UPDATE action_queue SET status = 'ignored', actioned_by = ?, actioned_note = ?, actioned_at = ?
-    WHERE id = ?
+    WHERE id = ? AND status = 'pending'
   `).run(actionedBy ?? null, note ?? null, nowMs(), id);
+  return result.changes > 0;
 }
 
 // ----------------------------------------------------------------- logbook_entries
