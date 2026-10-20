@@ -209,11 +209,11 @@ app.get('/api/logbook', (req, res) => {
 
 // ----------------------------------------------------------------- SNAPSHOT INGEST
 app.post('/api/snapshot/ingest', (req, res) => {
-  const { employees } = req.body || {};
+  const { employees, company_ids } = req.body || {};
   if (!Array.isArray(employees)) {
     return res.status(400).json({ error: 'employees array required' });
   }
-  ingestSnapshot(employees);
+  ingestSnapshot(employees, Array.isArray(company_ids) ? company_ids : undefined);
   res.json({ ok: true, count: employees.length });
 });
 

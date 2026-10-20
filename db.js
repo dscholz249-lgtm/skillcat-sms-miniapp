@@ -533,16 +533,25 @@ function normalizePhone(phone) {
 }
 
 // ----------------------------------------------------------------- employees (snapshot)
-function ingestSnapshot(employees) {
+// companyIds (optional) marks the snapshot as the complete roster for those
+// companies: anyone stored under them but absent from `employees` is dropped.
+// Without it the ingest is upsert-only, so a removed technician — or one the
+// roster replace re-created under a new id — kept matching inbound texts by
+// phone. Opt-outs live in their own table, so pruning never loses a STOP.
+function ingestSnapshot(employees, companyIds) {
   const replace = db.prepare(`
     INSERT OR REPLACE INTO employees (id, name, phone, email, title, company_id, company_name, snapshot_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const prune = db.prepare('DELETE FROM employees WHERE company_id = ? AND snapshot_at < ?');
   const ts = nowMs();
   db.transaction((rows) => {
     for (const e of rows) {
       replace.run(e.id, e.name, normalizePhone(e.phone), e.email ?? null, e.title ?? null, e.company_id ?? null, e.company_name ?? null, ts);
     }
+    // Every row just written carries snapshot_at = ts, so anything older under
+    // these companies wasn't in this roster.
+    for (const id of companyIds || []) prune.run(id, ts);
   })(employees || []);
 }
 
