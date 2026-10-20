@@ -17,7 +17,7 @@ const { capture } = require('./lib/analytics');
 const {
   listSessions, recentLog,
   getQueue, getQueueItem, markActioned, markIgnored, getManagerInfoByPhone,
-  getLogbook, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
+  getLogbook, softDeleteLogbookEntry, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
   getRequestActivity,
   getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
   getPhoneLinkRequest, deletePhoneLinkRequest, updateEmployeePhone,
@@ -205,6 +205,24 @@ app.get('/api/logbook', (req, res) => {
   const technicianId = req.query.technician_id || null;
   const selfOnly = req.query.self === '1';
   res.json(getLogbook(companyId, managerPhone, technicianId, selfOnly));
+});
+
+// Soft-delete one entry (PRD-434). The Next.js app decides who may delete what
+// and passes its scope: company_id always, manager_phone to restrict a plain
+// manager to entries they wrote.
+app.post('/api/logbook/:id/delete', (req, res) => {
+  const id = Number(req.params.id);
+  const { company_id, manager_phone, deleted_by } = req.body || {};
+  if (!Number.isInteger(id) || !company_id) {
+    return res.status(400).json({ error: 'id and company_id required' });
+  }
+  const ok = softDeleteLogbookEntry(id, {
+    companyId: company_id,
+    managerPhone: manager_phone || null,
+    deletedBy: deleted_by || null,
+  });
+  if (!ok) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
 });
 
 // ----------------------------------------------------------------- SNAPSHOT INGEST

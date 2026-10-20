@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS sms_opt_outs (
 -- Added for PRD-235 (opt-out notifications). Safe to re-run.
 ALTER TABLE sms_opt_outs ADD COLUMN IF NOT EXISTS email_sent_at BIGINT;
 
+-- Added for PRD-434 (managers/directors delete logs — soft delete). Apply
+-- before deploying that change, or the delete's mirror write fails and the
+-- log reappears after a reseed. Safe to re-run.
+ALTER TABLE sms_logbook_entries ADD COLUMN IF NOT EXISTS deleted_at BIGINT;   -- unix ms, matches SQLite
+ALTER TABLE sms_logbook_entries ADD COLUMN IF NOT EXISTS deleted_by TEXT;     -- deleter's email
+
 -- ----------------------------------------------------------------- RLS
 -- The miniapp uses the service role key so these policies don't affect it,
 -- but enabling RLS blocks any accidental anon exposure.

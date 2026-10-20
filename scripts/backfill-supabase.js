@@ -50,6 +50,8 @@ async function main() {
     tags: (() => { try { return JSON.parse(r.tags); } catch { return []; } })(),
     source_message_id: r.source_message_id,
     created_at: r.created_at,
+    deleted_at: r.deleted_at ?? null,
+    deleted_by: r.deleted_by ?? null,
   }));
 
   await backfillTable('technician_media', 'sms_technician_media', r => ({

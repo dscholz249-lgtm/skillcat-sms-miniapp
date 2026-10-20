@@ -153,6 +153,10 @@ db.exec(`
 // Safe migrations for existing databases
 try { db.exec('ALTER TABLE employees ADD COLUMN company_name TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE sms_opt_outs ADD COLUMN email_sent_at INTEGER'); } catch (_) {}
+// Soft delete (PRD-434): a manager/director removing a log hides it everywhere
+// it's read, but the row stays so an admin can restore it.
+try { db.exec('ALTER TABLE logbook_entries ADD COLUMN deleted_at INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE logbook_entries ADD COLUMN deleted_by TEXT'); } catch (_) {}
 
 function now() { return new Date().toISOString(); }
 function nowMs() { return Date.now(); }
@@ -503,7 +507,7 @@ function addLogbookEntry({ employeeId, employeeNameRaw, managerPhone, companyId,
 
 function getLogbook(companyId, managerPhone, technicianId, selfOnly = false) {
   const normalizedPhone = normalizePhone(managerPhone);
-  const conditions = [];
+  const conditions = ['deleted_at IS NULL'];
   const params = [];
   if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
   if (technicianId) {
@@ -519,8 +523,41 @@ function getLogbook(companyId, managerPhone, technicianId, selfOnly = false) {
     conditions.push("(manager_phone = ? OR manager_phone = '')");
     params.push(normalizedPhone);
   }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = `WHERE ${conditions.join(' AND ')}`;
   return db.prepare(`SELECT * FROM logbook_entries ${where} ORDER BY created_at DESC`).all(...params);
+}
+
+/**
+ * Soft-delete one entry. Scoped to its company, and — when managerPhone is
+ * given — to entries that manager wrote (a plain manager may only delete their
+ * own; a director passes no phone). Returns false when nothing matched, so a
+ * caller can't probe other companies' ids. The mirror gets the full row: a
+ * partial upsert would fail the NOT NULL checks on its insert path.
+ */
+function softDeleteLogbookEntry(id, { companyId, managerPhone, deletedBy }) {
+  const row = db.prepare(
+    'SELECT * FROM logbook_entries WHERE id = ? AND company_id = ? AND deleted_at IS NULL',
+  ).get(id, companyId);
+  if (!row) return false;
+  if (managerPhone && row.manager_phone !== normalizePhone(managerPhone)) return false;
+
+  const deletedAt = nowMs();
+  db.prepare('UPDATE logbook_entries SET deleted_at = ?, deleted_by = ? WHERE id = ?')
+    .run(deletedAt, deletedBy ?? null, id);
+  upsert('sms_logbook_entries', {
+    id: row.id,
+    employee_id: row.employee_id,
+    employee_name_raw: row.employee_name_raw,
+    manager_phone: row.manager_phone,
+    company_id: row.company_id,
+    body: row.body,
+    tags: (() => { try { return JSON.parse(row.tags); } catch { return []; } })(),
+    source_message_id: row.source_message_id,
+    created_at: row.created_at,
+    deleted_at: deletedAt,
+    deleted_by: deletedBy ?? null,
+  });
+  return true;
 }
 
 // Normalize any US phone format to E.164 (+1XXXXXXXXXX) for consistent storage/lookup.
@@ -973,13 +1010,15 @@ async function seedFromSupabase() {
     if (rows.length) {
       const ins = db.prepare(`
         INSERT OR IGNORE INTO logbook_entries
-          (id, employee_id, employee_name_raw, manager_phone, company_id, body, tags, source_message_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, employee_id, employee_name_raw, manager_phone, company_id, body, tags, source_message_id, created_at, deleted_at, deleted_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       db.transaction((rs) => {
         for (const r of rs) {
+          // deleted_at carries over so a soft-deleted log stays hidden after a reseed.
           ins.run(r.id, r.employee_id, r.employee_name_raw, r.manager_phone,
-            r.company_id, r.body, JSON.stringify(r.tags ?? []), r.source_message_id, r.created_at);
+            r.company_id, r.body, JSON.stringify(r.tags ?? []), r.source_message_id, r.created_at,
+            r.deleted_at ?? null, r.deleted_by ?? null);
         }
       })(rows);
       console.log(`[seed] logbook_entries: ${rows.length} rows restored`);
@@ -1087,7 +1126,7 @@ module.exports = {
   getSession, upsertSession, deleteSession, listSessions,
   logMessage, recentLog, getMessagesByPhones,
   enqueueAction, getQueue, getQueueItem, markActioned, markIgnored,
-  addLogbookEntry, getLogbook,
+  addLogbookEntry, getLogbook, softDeleteLogbookEntry,
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
   getTechnicianByPhone, addTechnicianMedia, getTechnicianMedia, getManagersByCompanyId,
   getAnalytics, getGlobalAnalytics, getRequestActivity, getLastActiveByPhones,
