@@ -510,6 +510,12 @@ function getLogbook(companyId, managerPhone, technicianId, selfOnly = false) {
   const conditions = ['deleted_at IS NULL'];
   const params = [];
   if (companyId) { conditions.push('company_id = ?'); params.push(companyId); }
+  // A course assignment (PRD-436) writes a copy into the technician's own
+  // logbook (manager_phone = ''). Manager views would read that as a
+  // technician-texted entry and show it twice, so only the technician sees it.
+  if (!technicianId) {
+    conditions.push(`NOT (manager_phone = '' AND tags LIKE '%"technician_copy"%')`);
+  }
   if (technicianId) {
     // Technician's own entries only — manager_phone = '' marks technician-originated entries
     conditions.push("employee_id = ? AND manager_phone = ''");
