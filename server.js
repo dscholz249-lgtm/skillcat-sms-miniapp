@@ -19,7 +19,7 @@ const {
   getQueue, getQueueItem, markActioned, markIgnored, getManagerInfoByPhone,
   getLogbook, softDeleteLogbookEntry, ingestSnapshot, logMessage, getAnalytics, getGlobalAnalytics,
   getRequestActivity,
-  getTechnicianMedia, getLastActiveByPhones, getMessagesByPhones,
+  getTechnicianMedia, getLastActiveByPhones, getRetentionByPhones, getMessagesByPhones,
   getPhoneLinkRequest, deletePhoneLinkRequest, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
   createBroadcast, getBroadcastByIdempotencyKey, completeBroadcast,
@@ -190,6 +190,17 @@ app.get('/api/analytics/activity', (_req, res) => {
 app.get('/api/last-active', (req, res) => {
   const phones = (req.query.phones || '').split(',').map(p => p.trim()).filter(Boolean);
   res.json(getLastActiveByPhones(phones));
+});
+
+// Labs Console retention (PRD-463): the Logbook's snapshot passes its roster
+// phones and the day being reported.
+app.get('/api/retention', (req, res) => {
+  const phones = (req.query.phones || '').split(',').map(p => p.trim()).filter(Boolean);
+  const asOf = String(req.query.as_of || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+    return res.status(400).json({ error: 'as_of must be YYYY-MM-DD' });
+  }
+  res.json(getRetentionByPhones(phones, asOf));
 });
 
 // ----------------------------------------------------------------- CONVERSATIONS

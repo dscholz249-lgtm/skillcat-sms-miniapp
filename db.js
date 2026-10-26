@@ -981,6 +981,53 @@ function getLastActiveByPhones(phones) {
   `).all(...normalized);
 }
 
+// Labs Console retention (PRD-463) for the given roster phones, as of a UTC day.
+// Same definition as Assessments: a person's clock starts on their first day
+// with an inbound message, and they're retained for a window if they texted on
+// any day inside it — d1 day 1 · w1 days 7–13 · m1 days 30–59 · m6 days
+// 180–209 — counted only once that whole window has passed by asOf.
+// Counts, not percentages: the Console divides.
+//
+// Deliberately not getAnalytics()'s retention, which counts anyone active on
+// or after day N — one text in month five would count for every window.
+function getRetentionByPhones(phones, asOf) {
+  const empty = { eligible: 0, retained: 0 };
+  const out = { d1: { ...empty }, w1: { ...empty }, m1: { ...empty }, m6: { ...empty } };
+  if (!phones || phones.length === 0) return out;
+  const normalized = phones.map(normalizePhone).filter(Boolean);
+  if (!normalized.length) return out;
+  const ph = normalized.map(() => '?').join(',');
+  const rows = db.prepare(`
+    WITH act AS (
+      SELECT DISTINCT manager_phone AS phone, substr(created_at, 1, 10) AS day
+      FROM message_log
+      WHERE direction = 'in'
+        AND manager_phone IN (${ph})
+        AND substr(created_at, 1, 10) <= @asOf
+    ),
+    cohort AS (
+      SELECT phone, MIN(day) AS first_day FROM act GROUP BY phone
+    ),
+    windows(win, lo, hi) AS (
+      VALUES ('d1', 1, 1), ('w1', 7, 13), ('m1', 30, 59), ('m6', 180, 209)
+    )
+    SELECT w.win,
+      SUM(date(c.first_day, '+' || w.hi || ' days') <= @asOf) AS eligible,
+      SUM(date(c.first_day, '+' || w.hi || ' days') <= @asOf AND EXISTS (
+        SELECT 1 FROM act a
+        WHERE a.phone = c.phone
+          AND a.day BETWEEN date(c.first_day, '+' || w.lo || ' days')
+                        AND date(c.first_day, '+' || w.hi || ' days')
+      )) AS retained
+    FROM windows w CROSS JOIN cohort c
+    GROUP BY w.win
+  `).all(...normalized, { asOf });
+  for (const r of rows) {
+    out[r.win] = { eligible: r.eligible ?? 0, retained: r.retained ?? 0 };
+  }
+  return out;
+}
+
 // ----------------------------------------------------------------- startup seed
 // Called once at boot. If a critical SQLite table is empty (fresh container
 // after a Railway restart), pulls all rows from Supabase and inserts them.
@@ -1136,6 +1183,7 @@ module.exports = {
   ingestSnapshot, findEmployee, findEmployeeCandidates, getCompanyByPhone, getManagerInfoByPhone,
   getTechnicianByPhone, addTechnicianMedia, getTechnicianMedia, getManagersByCompanyId,
   getAnalytics, getGlobalAnalytics, getRequestActivity, getLastActiveByPhones,
+  getRetentionByPhones,
   createPhoneLinkRequest, getPhoneLinkRequest, deletePhoneLinkRequest,
   findEmployeeByEmail, updateEmployeePhone,
   createAlert, getAlerts, markAlertRead,
